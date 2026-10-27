@@ -101,4 +101,12 @@ class CoreTest {
         assertEquals(listOf(0xe2, 0xe1), pad.sent)
         assertTrue(pages.isEmpty())
     }
+
+    @Test
+    fun wipeTriesDirectlyBeforeRegistering() {
+        val pad = FakePad(PadKind.SPARK, mutableListOf(1L to samplePage()))
+        val r = WacomSession(pad, PadKind.SPARK).wipe(hexToBytes("a1b2c3d4e5f6")) { error("no button press needed") }
+        assertEquals(listOf("delete all pages: ok", "reset to defaults: ok"), r)
+        assertEquals(listOf(0xe6, 0xe2, 0xe1), pad.sent)
+    }
 }

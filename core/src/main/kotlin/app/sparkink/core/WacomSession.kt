@@ -187,6 +187,19 @@ class WacomSession(
      * confirmation of a (re)registration, so call this after [register]. Both are tried even
      * if one fails; returns one result line per command. Not verified on hardware.
      */
+    /**
+     * Empty and reset the pad. First tries the commands straight after the (refused) login,
+     * since a full pad drops the link on e3; only if both are refused does it register first.
+     */
+    fun wipe(uuid: ByteArray, onPressButton: () -> Unit): List<String> {
+        try { connect(uuid) } catch (_: AuthorizationError) { /* not registered with us: expected */ }
+        val direct = eraseAndReset()
+        if (direct.any { it.endsWith(": ok") }) return direct
+        log("direct wipe refused, registering first")
+        register(uuid, onPressButton)
+        return eraseAndReset()
+    }
+
     fun eraseAndReset(): List<String> {
         return listOf(0xe2 to "delete all pages", 0xe1 to "reset to defaults").map { (op, what) ->
             try { ack(op, what = what); "$what: ok" } catch (e: Exception) { "$what: failed ($e)" }

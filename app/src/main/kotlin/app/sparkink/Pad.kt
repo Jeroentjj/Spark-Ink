@@ -130,10 +130,9 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                 t = BleTransport(ctx, device) { AppLog.add(it) }
                 val kind = t.open()
                 AppLog.add("pad family: $kind")
-                val session = WacomSession(t, kind) { AppLog.add(it) }
-                session.register(ByteArray(6).also { SecureRandom().nextBytes(it) }) { ui(pressButton) }
                 ui { status("Wissen en resetten…") }
-                val results = session.eraseAndReset()
+                val results = WacomSession(t, kind) { AppLog.add(it) }
+                    .wipe(ByteArray(6).also { SecureRandom().nextBytes(it) }) { ui(pressButton) }
                 results.forEach { AppLog.add("wipe: $it") }
                 prefs.padAddress = null
                 prefs.padUuid = null
