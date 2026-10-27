@@ -325,11 +325,8 @@ class MainActivity : Activity() {
     }
 
     private fun startPairing() = withBlePermissions {
-        AlertDialog.Builder(this)
-            .setTitle("Folio koppelen")
-            .setMessage("Houd de knop op de Folio minstens 6 seconden ingedrukt tot het lampje blauw knippert (afwisselend blauw-oranje betekent: geheugen vol). Tik dán pas op Zoeken en kies de Folio meteen: de koppelmodus duurt maar kort. Lukt het niet, begin dan opnieuw.")
-            .setPositiveButton("Zoeken") { _, _ -> pickDevice() }
-            .setNegativeButton("Annuleren", null).show()
+        setStatus("Houd de knop op de Folio minstens 6 seconden ingedrukt tot het lampje blauw knippert (afwisselend blauw-oranje betekent: geheugen vol) en kies de Folio meteen in de lijst: de koppelmodus duurt maar kort.")
+        pickDevice()
     }
 
     private fun pickDevice(onPick: (BluetoothDevice) -> Unit = ::finishPairing) {
@@ -358,11 +355,7 @@ class MainActivity : Activity() {
     private fun finishPairing(dev: BluetoothDevice) {
         if (busy) return
         busy = true
-        pad.pair(dev, { setStatus(it) }, {
-            AlertDialog.Builder(this).setTitle("Bevestig op de Folio")
-                .setMessage("Druk nu kort op de knop van de Folio om het koppelen te bevestigen.")
-                .setPositiveButton("OK", null).show()
-        }) { r ->
+        pad.pair(dev, { setStatus(it) }, { setStatus("Druk nu kort op de knop van de Folio om het koppelen te bevestigen.") }) { r ->
             busy = false
             r.onSuccess { setStatus(it); showList() }.onFailure { setStatus("Koppelen mislukt: ${it.message}") }
         }
@@ -371,11 +364,7 @@ class MainActivity : Activity() {
     private fun finishWipe(dev: BluetoothDevice) {
         if (busy) return
         busy = true
-        pad.wipe(dev, { setStatus(it) }, {
-            AlertDialog.Builder(this).setTitle("Bevestig op de Folio")
-                .setMessage("Druk nu kort op de knop van de Folio. Daarna wist en reset de app hem automatisch.")
-                .setPositiveButton("OK", null).show()
-        }) { r ->
+        pad.wipe(dev, { setStatus(it) }, { setStatus("Druk nu kort op de knop van de Folio. Daarna wist en reset de app hem automatisch.") }) { r ->
             busy = false
             r.onSuccess { setStatus(it); showList() }.onFailure { setStatus("Wissen mislukt: ${it.message}") }
         }
