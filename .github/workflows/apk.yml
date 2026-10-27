@@ -1,0 +1,52 @@
+name: Build Spark Ink APK
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "core/**"
+      - "*.kts"
+      - "gradle/**"
+      - ".github/workflows/apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Protocol and parser tests
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :core:test
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Keep the APK as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SparkInk-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish as the "sparkink-latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk SparkInk.apk
+          gh release delete sparkink-latest --cleanup-tag --yes || true
+          gh release create sparkink-latest SparkInk.apk \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Spark Ink (latest build)" \
+            --notes "Debug build of commit ${GITHUB_SHA::7}. Install over the previous version; notes and settings are kept."
