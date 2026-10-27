@@ -182,6 +182,18 @@ class WacomSession(
     }
 
     /**
+     * Erase all pages (e2) and reset the pad to factory defaults (e1), the commands behind
+     * Inkspace's hidden "Device Memory Reset". Inkspace sends them right after the button
+     * confirmation of a (re)registration, so call this after [register]. Both are tried even
+     * if one fails; returns one result line per command. Not verified on hardware.
+     */
+    fun eraseAndReset(): List<String> {
+        return listOf(0xe2 to "delete all pages", 0xe1 to "reset to defaults").map { (op, what) ->
+            try { ack(op, what = what); "$what: ok" } catch (e: Exception) { "$what: failed ($e)" }
+        }
+    }
+
+    /**
      * Download every stored page. [onPage] must persist the page and return true; only then
      * is it deleted from the pad. Throws [DeviceError] with invalidState when the pad is not
      * in "ready to sync" state.

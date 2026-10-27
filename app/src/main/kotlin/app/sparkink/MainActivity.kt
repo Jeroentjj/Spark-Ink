@@ -121,6 +121,12 @@ class MainActivity : Activity() {
             button("Folio koppelen") { startPairing() },
             button("Synchroniseer") { startSync() },
         ))
+        root.addView(row(button("Folio wissen + resetten") {
+            withBlePermissions {
+                setStatus("Houd de knop van de Folio ingedrukt tot hij in de lijst verschijnt en kies hem. WAARSCHUWING: alle pagina's op de Folio worden gewist.")
+                pickDevice(::finishWipe)
+            }
+        }))
         val statusView = TextView(this).apply { text = statusText; setPadding(0, dp(8), 0, dp(8)) }
         status = statusView
         root.addView(statusView)
@@ -326,7 +332,7 @@ class MainActivity : Activity() {
             .setNegativeButton("Annuleren", null).show()
     }
 
-    private fun pickDevice() {
+    private fun pickDevice(onPick: (BluetoothDevice) -> Unit = ::finishPairing) {
         val found = ArrayList<BluetoothDevice>()
         val names = ArrayList<String>()
         val adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, names)
@@ -334,7 +340,7 @@ class MainActivity : Activity() {
             .setTitle("Kies je Folio")
             .setAdapter(adapter) { _, which ->
                 pad.stopScan()
-                finishPairing(found[which])
+                onPick(found[which])
             }
             .setNegativeButton("Annuleren") { _, _ -> pad.stopScan() }
             .setOnCancelListener { pad.stopScan() }
@@ -359,6 +365,19 @@ class MainActivity : Activity() {
         }) { r ->
             busy = false
             r.onSuccess { setStatus(it); showList() }.onFailure { setStatus("Koppelen mislukt: ${it.message}") }
+        }
+    }
+
+    private fun finishWipe(dev: BluetoothDevice) {
+        if (busy) return
+        busy = true
+        pad.wipe(dev, { setStatus(it) }, {
+            AlertDialog.Builder(this).setTitle("Bevestig op de Folio")
+                .setMessage("Druk nu kort op de knop van de Folio. Daarna wist en reset de app hem automatisch.")
+                .setPositiveButton("OK", null).show()
+        }) { r ->
+            busy = false
+            r.onSuccess { setStatus(it); showList() }.onFailure { setStatus("Wissen mislukt: ${it.message}") }
         }
     }
 

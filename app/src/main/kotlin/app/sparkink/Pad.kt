@@ -20,7 +20,7 @@ import java.util.concurrent.Executors
 
 // LED meanings from Wacom support ("What do the LEDs on Bamboo Spark mean?").
 private const val LED_HINT = "Lampje: blauw knipperend = koppelmodus, oranje knipperend = batterij bijna leeg, " +
-    "afwisselend blauw-oranje = geheugen vol (de Folio moet eerst gekoppeld en gesynchroniseerd worden om het te legen)."
+    "afwisselend blauw-oranje = geheugen vol (gebruik dan Folio wissen + resetten)."
 
 /** In-memory debug log, shown and shareable from the app: it is the way to debug against the real pad. */
 object AppLog {
@@ -112,6 +112,39 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
             } catch (e: Exception) {
                 AppLog.add("pair failed: $e")
                 ui { done(Result.failure(Exception("${explain(e)} $LED_HINT Druk na het koppelverzoek binnen 5 seconden op de knop."))) }
+            } finally {
+                t?.close()
+            }
+        }
+    }
+
+    /**
+     * Register (user presses the pad button), then erase + factory-reset the pad, like Inkspace's
+     * hidden "Device Memory Reset" (see [WacomSession.eraseAndReset]). Forgets our registration.
+     */
+    fun wipe(device: BluetoothDevice, status: (String) -> Unit, pressButton: () -> Unit, done: (Result<String>) -> Unit) {
+        worker.execute {
+            var t: BleTransport? = null
+            try {
+                ui { status("Verbinden met ${device.name} om te wissen…") }
+                t = BleTransport(ctx, device) { AppLog.add(it) }
+                val kind = t.open()
+                AppLog.add("pad family: $kind")
+                val session = WacomSession(t, kind) { AppLog.add(it) }
+                session.register(ByteArray(6).also { SecureRandom().nextBytes(it) }) { ui(pressButton) }
+                ui { status("Wissen en resetten…") }
+                val results = session.eraseAndReset()
+                results.forEach { AppLog.add("wipe: $it") }
+                prefs.padAddress = null
+                prefs.padUuid = null
+                val ok = results.any { it.endsWith(": ok") }
+                ui {
+                    if (ok) done(Result.success("Folio gewist. Houd nu de knop 6 seconden ingedrukt tot het lampje blauw knippert en tik op Folio koppelen."))
+                    else done(Result.failure(Exception("de Folio weigerde beide commando's. Zie de log.")))
+                }
+            } catch (e: Exception) {
+                AppLog.add("wipe failed: $e")
+                ui { done(Result.failure(Exception(explain(e)))) }
             } finally {
                 t?.close()
             }

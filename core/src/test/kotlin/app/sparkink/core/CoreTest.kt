@@ -91,4 +91,14 @@ class CoreTest {
         WacomSession(pad, PadKind.SPARK).syncAll(hexToBytes("a1b2c3d4e5f6")) { false }
         assertEquals(0, pad.deleted)
     }
+
+    @Test
+    fun eraseDeletesAllThenResets() {
+        val pages = mutableListOf(1L to samplePage())
+        val pad = FakePad(PadKind.SPARK, pages)
+        val r = WacomSession(pad, PadKind.SPARK).eraseAndReset()
+        assertEquals(listOf("delete all pages: ok", "reset to defaults: ok"), r)
+        assertEquals(listOf(0xe2, 0xe1), pad.sent)
+        assertTrue(pages.isEmpty())
+    }
 }
