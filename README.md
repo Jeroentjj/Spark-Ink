@@ -15,7 +15,7 @@ Daarna kun je updaten met de knop **Update** in de app (GitHub-token met alleen 
 
 ## Koppelen
 
-Houd de knop van het pad 6+ seconden ingedrukt tot het lampje knippert, tik op **Folio koppelen**,
+Houd de knop van het pad 6+ seconden ingedrukt tot het lampje blauw knippert (blauw-oranje = geheugen vol), tik op **Folio koppelen**,
 kies het pad en bevestig het Bluetooth-koppelverzoek op je telefoon. Synchroniseren: tik op **Synchroniseer**
 en druk daarna kort op de knop van het pad. Bij problemen: knop **Log** in de app.
 

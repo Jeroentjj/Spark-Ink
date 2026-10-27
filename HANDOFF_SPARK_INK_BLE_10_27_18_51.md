@@ -75,12 +75,15 @@ The user bought a second-hand **Wacom Bamboo Spark / "Spark Folio"** (BLE name `
 1. On the first phone (Android 13), pairing failed with no GATT callback at all (status -1 time-outs, once 133). Adverts were fine: `connectable=true flags=5 rssi=-35`. Not resolved. Suspected: a stale bond, or too many concurrent BLE links (Amazfit, WH-1000XM3, Fitbit). nRF Connect test requested, **never answered**.
 2. "Pair in BT settings" didn't work on the first phone. On a **second phone** the system pairing "succeeds" but the Folio keeps blinking.
 3. Second phone with the app: `gatt state=2 status=0`, services found, then **"Enabling notifications timed out"** (10 s). Root-cause hypothesis: the CCCD write needs encryption, so Android starts bonding, and the app aborted before the user confirmed.
-4. Fix pushed (Experiments run 6, included in Spark-Ink `main`): 60 s wait; on status 5 or 15, wait for BOND_BONDED and write again. **Awaiting the user's log.**
+4. Fix pushed (Experiments run 6, included in Spark-Ink `main`): 60 s wait; on status 5 or 15, wait for BOND_BONDED and write again.
+5. **2026-10-27 evening, OnePlus 9 log (from an opencode session):** notifications now enable without bonding (`bond=10` throughout), `pad family: SPARK`, `> e6 …` gives `< b3/01 01` (the expected auth error in pairing mode), `> e3 01` is sent, then about **5 s later** `gatt state=0 status=8` (link supervision timeout, the pad drops the link). Reproduced twice. So the BLE layer works; registration fails because the pad gives up while waiting for the button press.
+6. **Probable root cause: the pad's memory is full.** The user sees the LED **alternately blue and orange**. Wacom support ("What do the LEDs on Bamboo Spark mean?"): blue blinking = pairing, orange blinking = low battery, orange solid = charging, blue solid = page has content, green solid = page empty, **blue-orange = memory full**. The app's own pairing text wrongly said "wait until it blinks blue/orange"; this is now fixed, and failures show an LED legend.
+7. Not taken over from opencode: (a) its `WacomSession.register` edit only moved `onPressButton()` inside the `if` and added a 500 ms sleep; the prompt was already shown right after `e3`, so the edit changed nothing; (b) its `gradle.properties` edit (`-Xmx512m`, no daemon) was a workaround for a 32-bit Java 8 on the laptop. AGP 8.5 needs JDK 17, so a local build needs JDK 17 anyway; CI is unaffected.
 
 Other gotchas:
 - The repos are private. Downloading without being logged in gives a 404 or HTML page, which the phone reports as "pakket ongeldig". Use a browser logged in to GitHub.
 - The installed app's updater may point at the old repo (`Jeroentjj/Experiments`). The first install from Spark-Ink must be manual.
-- GitHub Actions on Spark-Ink needs write workflow permissions to create the release. Run 1 was green; whether the release asset exists there was **not verified**.
+- GitHub Actions on Spark-Ink needs write workflow permissions to create the release. Run 1 was green, and the release `sparkink-latest` with `SparkInk.apk` exists (verified 2026-10-27).
 - This sandbox cannot reach `dl.google.com` (no Android SDK) or Google Drive. GitHub raw, Maven Central and plugins.gradle.org work.
 
 ---
@@ -96,13 +99,14 @@ Other gotchas:
 ## Next Steps
 
 ### Immediate
-1. Get the user's log from the **second phone** with the latest APK (from the `Jeroentjj/Spark-Ink` release). Check for the lines `enable notifications … (round N, bond=…)`, `link needs pairing`, and then the `e3`/`e4` registration exchange (`> e3 01`, `< e4/…`).
-2. If registration works, test sync. Write on paper, tap Synchroniseer, *then* press the button. Verify the parser output; the raw bytes are saved as `filesDir/notes/<id>.raw`.
-3. If notifications still fail: consider calling `createBond()` explicitly *after* connect, when the CCCD write returns 5/15. Also consider `requestConnectionPriority(HIGH)` and a short delay after `onServicesDiscovered`.
+1. Charge the Folio fully. Then hold the button 6+ s until the LED blinks **blue only** (not blue-orange) and pair from the OnePlus 9. Press the pad button within ~5 s of the "Bevestig op de Folio" prompt. Look for `< e4` in the log.
+2. If the pad only ever shows blue-orange: memory is full and it may refuse a new registration. Emptying needs a registered app that syncs (sync deletes each page after saving). Options: Tuhi on a Linux machine, or the old Inkspace app if it was ever registered. There is no documented factory reset; don't guess one.
+3. If registration works, test sync. Write on paper, tap Synchroniseer, *then* press the button. Verify the parser output; the raw bytes are saved as `filesDir/notes/<id>.raw`.
+4. If notifications still fail: consider calling `createBond()` explicitly *after* connect, when the CCCD write returns 5/15. Also consider `requestConnectionPriority(HIGH)` and a short delay after `onServicesDiscovered`.
 
 ### Subsequent
 - Main phone: ask for the nRF Connect result. Try with other BLE devices disconnected. Consider calling `BluetoothGatt.refresh()` via reflection (Inkspace references `refresh`, `autoConnect` and `autoconnectDelayInMillis`; it does not use `createBond`).
-- Verify the `sparkink-latest` release exists on Spark-Ink. Optionally remove `spark-ink/` and `.github/workflows/sparkink-apk.yml` from Experiments, but only if the user asks.
+- Optionally remove `spark-ink/` and `.github/workflows/sparkink-apk.yml` from Experiments, but only if the user asks.
 - Optional features: upload the ink image to Notion (File Upload API); show pressure-based stroke width.
 
 ---
@@ -120,7 +124,8 @@ GitHub MCP: `actions_list` / `get_workflow_run` on owner `jeroentjj`, repo `spar
 ---
 
 ## Open Questions
-- [ ] Does the 60 s bond wait make pairing succeed on the second phone?
+- [x] Does the 60 s bond wait make pairing succeed on the second phone? Notifications now work (no bond needed); registration still fails, see timeline 5–6.
+- [ ] Does pairing work once the LED blinks blue only (memory not full)?
 - [ ] Does nRF Connect connect on the main phone?
 - [ ] Is the Spark-Ink repo private? (Probably yes; the updater needs a token.)
 - [ ] Is the default page rotation correct for the Folio?

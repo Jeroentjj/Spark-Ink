@@ -18,6 +18,10 @@ import app.sparkink.core.hexToBytes
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 
+// LED meanings from Wacom support ("What do the LEDs on Bamboo Spark mean?").
+private const val LED_HINT = "Lampje: blauw knipperend = koppelmodus, oranje knipperend = batterij bijna leeg, " +
+    "afwisselend blauw-oranje = geheugen vol (de Folio moet eerst gekoppeld en gesynchroniseerd worden om het te legen)."
+
 /** In-memory debug log, shown and shareable from the app: it is the way to debug against the real pad. */
 object AppLog {
     private val sb = StringBuilder()
@@ -107,7 +111,7 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                 ui { done(Result.success("Gekoppeld met ${device.name} (batterij ${info.batteryPercent}%)")) }
             } catch (e: Exception) {
                 AppLog.add("pair failed: $e")
-                ui { done(Result.failure(Exception(explain(e)))) }
+                ui { done(Result.failure(Exception("${explain(e)} $LED_HINT Druk na het koppelverzoek binnen 5 seconden op de knop."))) }
             } finally {
                 t?.close()
             }
@@ -157,7 +161,7 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
     private fun explain(e: Exception): String = when (e) {
         is AuthorizationError -> "De Folio herkent deze app niet meer. Koppel opnieuw (knop 6 sec ingedrukt houden)."
         is DeviceError -> if (e.invalidState)
-            "De Folio is niet klaar om te synchroniseren. Controleer het lampje (zie de uitleg in de app) en probeer opnieuw."
+            "De Folio is niet klaar om te synchroniseren. $LED_HINT"
         else "De Folio gaf foutcode ${e.code}. Zie de log."
         else -> e.message ?: e.toString()
     }

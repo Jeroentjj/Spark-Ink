@@ -321,7 +321,7 @@ class MainActivity : Activity() {
     private fun startPairing() = withBlePermissions {
         AlertDialog.Builder(this)
             .setTitle("Folio koppelen")
-            .setMessage("Houd de knop op de Folio minstens 6 seconden ingedrukt tot het lampje blauw/oranje knippert. Tik dán pas op Zoeken en kies de Folio meteen: de koppelmodus duurt maar kort. Lukt het niet, begin dan opnieuw.")
+            .setMessage("Houd de knop op de Folio minstens 6 seconden ingedrukt tot het lampje blauw knippert (afwisselend blauw-oranje betekent: geheugen vol). Tik dán pas op Zoeken en kies de Folio meteen: de koppelmodus duurt maar kort. Lukt het niet, begin dan opnieuw.")
             .setPositiveButton("Zoeken") { _, _ -> pickDevice() }
             .setNegativeButton("Annuleren", null).show()
     }
