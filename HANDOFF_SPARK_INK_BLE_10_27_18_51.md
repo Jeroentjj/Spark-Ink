@@ -91,8 +91,9 @@ Other gotchas:
 
 ## Current State
 
-- **Working (verified):** core tests (11/11), CI APK builds (Experiments runs 1–7, Spark-Ink run 1), scanning finds the pad, and GATT connect plus service discovery on the second phone.
-- **Unverified on hardware:** registration (`e3`/`e4`), sync and download, the stroke parser on real data, rotation default, ML Kit and Claude OCR, Notion export, updater install.
+- **Working (verified on hardware, 2026-10-28, OnePlus 9, build 2b80d41):** "Folio wissen + resetten" emptied the full pad. `> e2 01 00` was sent after the refused login, the pad dropped the link (`status=19`), and the LED turned **green** (page empty). After that, registration (`e3`/`e4`) works, and so does unpair plus re-pair. The app reports the wipe as failed because the link drops after `e2`; the `e1` reset and the registration fallback then run on a dead link. Cosmetic, to fix.
+- **Working (verified):** core tests (13/13), CI APK builds, scanning, GATT connect and service discovery on the OnePlus 9.
+- **Unverified on hardware:** sync and download, the stroke parser on real data, rotation default, ML Kit and Claude OCR, Notion export, updater install.
 - **Not working:** pairing on the user's main phone (no GATT response).
 
 ---
