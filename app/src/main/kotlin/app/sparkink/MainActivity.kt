@@ -54,6 +54,20 @@ import android.view.ViewConfiguration
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import kotlin.math.abs
+import kotlin.math.atan2
+import kotlin.math.hypot
+import kotlin.math.min
+import android.graphics.Canvas
+import android.graphics.Path
+import android.graphics.RadialGradient
+import android.graphics.RectF
+import android.graphics.Shader
+import android.graphics.SweepGradient
+import android.view.ViewTreeObserver
+import android.view.animation.DecelerateInterpolator
+import android.widget.AdapterView
+import android.widget.SeekBar
+import android.widget.Spinner
 import android.graphics.Paint
 import android.view.inputmethod.EditorInfo
 import android.animation.ValueAnimator
@@ -79,7 +93,9 @@ class MainActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
     private val thumbBg = Executors.newSingleThreadExecutor()
-    private val thumbs = LruCache<String, Bitmap>(48)
+    private val thumbs = object : LruCache<String, Bitmap>(48 * 1024) { // KB
+        override fun sizeOf(key: String, value: Bitmap) = value.byteCount / 1024
+    }
 
     // Navigation: a page ([current]) sits inside a notebook ([openBook], "" = loose pages, null = home).
     private var current: Note? = null
@@ -91,8 +107,9 @@ class MainActivity : Activity() {
     private var inLive = false
     private var inTodos = false
     private var showList = false
-    private var orderPick: ArrayList<String>? = null // page ids tapped in "set order" or "merge" mode
-    private var merging = false // what the tapped pages are for: merge them, or put them in order
+    private var selected: ArrayList<String>? = null // pages picked in the open notebook, in the order tapped
+    private var dragMode = false // pages show a handle to drag them to another place or chapter
+    private var bookScroll: ScrollView? = null // keeps the place in a notebook when it is redrawn
     private var resumed = false
     private var lastAutoSync = 0L
     private val autoTried = HashSet<String>() // pages already given one automatic text recognition
@@ -163,17 +180,16 @@ class MainActivity : Activity() {
         if (hasFocus && ::prefs.isInitialized) immersive()
     }
 
-    /** Full screen: status and navigation bar hidden, a swipe from the edge shows them for a moment. */
+    /** Full screen: status bar hidden (a swipe from the top shows it for a moment); the navigation bar stays. */
     private fun immersive() {
         if (Build.VERSION.SDK_INT >= 30) {
             window.insetsController?.let {
-                it.hide(WindowInsets.Type.systemBars())
+                it.hide(WindowInsets.Type.statusBars())
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         } else {
             @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
-                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
         }
     }
 
@@ -191,7 +207,7 @@ class MainActivity : Activity() {
         if (!resumed || !::prefs.isInitialized || !prefs.autoSync || !pad.isPaired || !pad.bluetoothOn || missingBlePermissions().isNotEmpty()) return
         pad.watch {
             // not in Settings: pairing, erasing and pad commands there use the same advert
-            if (busy || inLive || inSettings || orderPick != null || System.currentTimeMillis() - lastAutoSync < 20_000) return@watch
+            if (busy || inLive || inSettings || selected != null || dragMode || System.currentTimeMillis() - lastAutoSync < 20_000) return@watch
             lastAutoSync = System.currentTimeMillis()
             startSync(openBook ?: "")
         }
@@ -211,7 +227,7 @@ class MainActivity : Activity() {
         when {
             inLive -> { pad.stopLive(); inLive = false; if (book != null) showBook(book) else showHome() }
             inTodos && current == null -> { inTodos = false; showHome() }
-            current == null && orderPick != null -> { orderPick = null; merging = false; setStatus(""); showBook(book ?: "") }
+            current == null && (selected != null || dragMode) -> { selected = null; dragMode = false; showBook(book ?: "") }
             current != null -> { saveEditor(); current = null; showBook(book ?: "") }
             inSettings -> { saveSettings?.invoke(); saveSettings = null; showHome() }
             book != null -> showHome()
@@ -273,7 +289,7 @@ class MainActivity : Activity() {
 
     private fun rowOf(vararg views: View) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        views.forEach { addView(it, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }) }
+        views.forEach { addView(it, LinearLayout.LayoutParams(0, dp(44), 1f).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }) }
     }
 
     /** A rounded, tinted button with an icon, for use inside screens (settings). */
@@ -281,9 +297,10 @@ class MainActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
         background = rounded(if (color == Ui.ACCENT) Ui.ACCENT_SOFT else Ui.DANGER_SOFT, 22)
-        setPadding(dp(12), dp(11), dp(12), dp(11))
+        setPadding(dp(12), 0, dp(12), 0)
+        minimumHeight = dp(44)
         addView(icon(iconRes, color, 18))
-        addView(label(text, 14f, color, bold = true).apply { setPadding(dp(8), 0, 0, 0) })
+        addView(label(text, 14f, color, bold = true).apply { setPadding(dp(8), 0, 0, 0); maxLines = 1; ellipsize = TextUtils.TruncateAt.END })
         ripple(this)
         setOnClickListener { onClick() }
     }
@@ -318,14 +335,14 @@ class MainActivity : Activity() {
     }
 
     /**
-     * Every screen: header, status line, body, and the action sheet hidden behind a small tab
-     * at the bottom.
+     * Every screen: header, status line, body, and the action bar at the bottom. Its label row always
+     * shows; the buttons slide up under it, below a divider.
      */
-    private fun scaffold(header: View, body: View, actions: List<Action>) {
+    private fun scaffold(header: View, body: View, actions: List<Action>, barLabel: String = tr("Acties", "Actions")) {
         val root = FrameLayout(this).apply { setBackgroundColor(Ui.BG) }
         val col = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(16), dp(16), if (actions.isEmpty()) dp(16) else dp(40))
+            setPadding(dp(16), dp(16), dp(16), if (actions.isEmpty()) dp(16) else dp(52))
         }
         col.addView(header)
         val st = label(statusText, 13f, Ui.MUTED).apply {
@@ -336,52 +353,53 @@ class MainActivity : Activity() {
         col.addView(st)
         col.addView(body, LinearLayout.LayoutParams(MATCH, 0, 1f))
         root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
-        if (actions.isNotEmpty()) root.addView(sheet(root, actions), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        if (actions.isNotEmpty()) root.addView(sheet(actions, barLabel), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
         setContentView(root)
     }
 
-    /** One row of actions at the bottom, behind a small tab; tap the tab or swipe up/down to open or close. */
-    private fun sheet(root: ViewGroup, actions: List<Action>): View {
+    /** Google Photos style: tap the label row or swipe to slide the buttons up or down; the label stays. */
+    private fun sheet(actions: List<Action>, barLabel: String): View {
         val r = dp(22).toFloat()
-        // always one row that fits the width: never scrolls, never covers the page
-        val cols = actions.size
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
-            elevation = dp(12).toFloat()
-            setPadding(dp(2), dp(6), dp(2), dp(8))
-            visibility = if (sheetOpen) View.VISIBLE else View.GONE
-            actions.chunked(cols).forEach { chunk ->
-                addView(LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    for (i in 0 until cols) {
-                        val a = chunk.getOrNull(i)
-                        addView(if (a != null) actionButton(a) else View(context), LinearLayout.LayoutParams(0, WRAP, 1f))
-                    }
-                })
-            }
-        }
-        val chevron = icon(if (sheetOpen) R.drawable.ic_expand_more else R.drawable.ic_expand_less, Ui.MUTED, 22)
-        fun setOpen(open: Boolean) {
-            if (open == sheetOpen) return
-            sheetOpen = open
-            TransitionManager.beginDelayedTransition(root)
-            panel.visibility = if (open) View.VISIBLE else View.GONE
-            chevron.setImageResource(if (open) R.drawable.ic_expand_more else R.drawable.ic_expand_less)
-        }
-        val tab = FrameLayout(this).apply {
-            background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
-            elevation = dp(12).toFloat()
+        val chevron = icon(R.drawable.ic_expand_less, Ui.MUTED, 22)
+        val head = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), 0, dp(16), 0)
             contentDescription = tr("Knoppen tonen", "Show buttons")
-            addView(chevron, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
-            setOnClickListener { setOpen(!sheetOpen) }
+            addView(label(barLabel, 14f, Ui.INK, bold = true).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END }, LinearLayout.LayoutParams(0, WRAP, 1f))
+            addView(chevron)
         }
-        return SwipeBar(this) { up -> setOpen(up) }.apply {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(dp(2), dp(8), dp(2), dp(10))
+            for (a in actions) addView(actionButton(a), LinearLayout.LayoutParams(0, WRAP, 1f))
+        }
+        lateinit var bar: SwipeBar
+        fun place(open: Boolean, animate: Boolean) {
+            sheetOpen = open
+            val y = if (open) 0f else (bar.height - head.height).toFloat()
+            val ms = if (animate) 220L else 0L
+            chevron.animate().rotation(if (open) 180f else 0f).setDuration(ms).start()
+            if (animate) bar.animate().translationY(y).setDuration(ms).setInterpolator(DecelerateInterpolator()).start() else bar.translationY = y
+        }
+        bar = SwipeBar(this) { up -> if (up != sheetOpen) place(up, true) }.apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            addView(tab, LinearLayout.LayoutParams(dp(72), dp(28)))
-            addView(panel, LinearLayout.LayoutParams(MATCH, WRAP))
+            background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
+            elevation = dp(12).toFloat()
+            addView(head, LinearLayout.LayoutParams(MATCH, dp(48)))
+            addView(View(context).apply { setBackgroundColor(Ui.LINE) }, LinearLayout.LayoutParams(MATCH, dp(1)).apply { setMargins(dp(16), 0, dp(16), 0) })
+            addView(row, LinearLayout.LayoutParams(MATCH, WRAP))
         }
+        head.setOnClickListener { place(!sheetOpen, true) }
+        // place the bar before its first frame, so a closed bar never flashes open
+        bar.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                bar.viewTreeObserver.removeOnPreDrawListener(this)
+                place(sheetOpen, false)
+                return true
+            }
+        })
+        return bar
     }
 
     private fun actionButton(a: Action) = LinearLayout(this).apply {
@@ -398,7 +416,7 @@ class MainActivity : Activity() {
             maxLines = 1; ellipsize = TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(MATCH, WRAP))
         ripple(this)
-        setOnClickListener { sheetOpen = false; a.run() }
+        setOnClickListener { a.run() }
     }
 
     private fun setStatus(s: String) {
@@ -409,16 +427,19 @@ class MainActivity : Activity() {
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
+    /** A message that goes away by itself (sync results and errors), instead of a status line that stays. */
+    private fun popup(s: String) { setStatus(""); toast(s) }
+
     private fun pages(n: Int) = if (n == 1) tr("1 pagina", "1 page") else tr("$n pagina's", "$n pages")
 
     private fun dateOf(n: Note) = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(n.timestamp * 1000))
 
-    private fun loadThumb(n: Note, into: ImageView) {
-        val key = "${n.id}_${n.rotation}_${n.strokes.size}_${n.tidyOn && n.tidy.isNotEmpty()}"
+    private fun loadThumb(n: Note, into: ImageView, edge: Int = 480) {
+        val key = "${n.id}_${n.rotation}_${n.strokes.size}_${n.tidyOn && n.tidy.isNotEmpty()}_$edge"
         thumbs.get(key)?.let { into.setImageBitmap(it); return }
         into.tag = key
         thumbBg.execute {
-            val b = Render.bitmap(n.sketch(), 480, cropToInk = false, ink = prefs.inkColor, widthMm = prefs.inkWidth)
+            val b = Render.bitmap(n.sketch(), edge, cropToInk = false, ink = prefs.inkColor, widthMm = prefs.inkWidth)
             main.post { thumbs.put(key, b); if (into.tag == key) into.setImageBitmap(b) }
         }
     }
@@ -428,6 +449,7 @@ class MainActivity : Activity() {
     private fun showHome() {
         saveEditor()
         current = null; editor = null; openBook = null; inSettings = false; inTodos = false; saveSettings = null
+        selected = null; dragMode = false
         val notes = store.all()
         val content = FrameLayout(this)
         fun fill() {
@@ -436,7 +458,7 @@ class MainActivity : Activity() {
             content.addView(if (q.isEmpty()) {
                 val cells = ArrayList<View>()
                 cells.add(looseCard(notes.filter { it.notebookId.isEmpty() }))
-                todoCard(notes)?.let { cells.add(it) }
+                cells.add(todoCard(notes))
                 books.all().forEach { b -> cells.add(bookCard(b, notes.count { it.notebookId == b.id })) }
                 cells.add(newBookCard())
                 grid(cells)
@@ -460,13 +482,32 @@ class MainActivity : Activity() {
         }
         fill()
         val body = ScrollView(this).apply { addView(content) }
-        val top = FrameLayout(this).apply { setPadding(dp(6), 0, dp(6), 0); addView(search) }
-        scaffold(header(top, back = false), body, listOf(
+        val badge = BatteryBadge(this, prefs.padBattery).apply {
+            contentDescription = tr("Batterij van de Folio", "Folio battery")
+            setOnClickListener {
+                toast(if (prefs.padBattery >= 0) tr("Folio-batterij ${prefs.padBattery}% (bij de laatste verbinding)", "Folio battery ${prefs.padBattery}% (at the last connection)")
+                      else tr("Batterij nog onbekend: synchroniseer een keer", "Battery not known yet: sync once"))
+            }
+        }
+        val menu = icon(R.drawable.ic_menu, Ui.INK).apply {
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            contentDescription = tr("Instellingen", "Settings")
+            ripple(this)
+            setOnClickListener { showSettings() }
+        }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(8))
+            addView(badge, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(search, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(10), 0, dp(6), 0) })
+            addView(menu, LinearLayout.LayoutParams(dp(40), dp(40)))
+        }
+        scaffold(top, body, listOf(
             Action(tr("Synchroniseer", "Sync"), R.drawable.ic_sync) { startSync("") },
             Action("Live", R.drawable.ic_edit) { showLive() },
             Action(tr("Notitieblok", "Notebook"), R.drawable.ic_add) { newBook() },
-            Action(tr("Instellingen", "Settings"), R.drawable.ic_settings) { showSettings() },
-        ))
+        ), "Spark Ink")
     }
 
     private fun bookCard(b: Notebook, count: Int) = FrameLayout(this).apply {
@@ -536,9 +577,12 @@ class MainActivity : Activity() {
 
     private fun showBook(id: String) {
         saveEditor()
+        val keepY = if (openBook == id) bookScroll?.scrollY ?: 0 else 0
         current = null; editor = null; openBook = id; inSettings = false; inTodos = false; saveSettings = null
         val book = books.get(id)
         val notes = store.all().filter { it.notebookId == (book?.id ?: "") }.sortedBy { it.sortKey }
+        val sel = selected
+        val big = prefs.pageView == "list"
         val titleCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             if (book == null) addView(label(tr("Losse pagina's", "Loose pages"), 24f, Ui.INK, bold = true))
@@ -563,42 +607,23 @@ class MainActivity : Activity() {
             label(if (book == null) tr("Geen losse pagina's. Nieuwe pagina's van de Folio komen hier terecht.", "No loose pages. New pages from the Folio land here.")
                   else tr("Nog geen pagina's. Synchroniseer vanuit dit notitieblok, of verplaats pagina's hierheen.", "No pages yet. Sync from this notebook, or move pages here."), 15f, Ui.MUTED)
                 .apply { gravity = Gravity.CENTER; setPadding(dp(24), dp(48), dp(24), 0) }
-        } else ScrollView(this).apply { addView(grid(notes.map { pageCard(it, inBook = notes) })) }
+        } else {
+            val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            // pages without a chapter first, then the chapters in the order of their first page
+            val chapters = notes.map { it.chapter }.distinct().sortedBy { it.isNotEmpty() }
+            for (ch in chapters) {
+                val inCh = notes.filter { it.chapter == ch }
+                if (chapters.size > 1 || ch.isNotEmpty()) col.addView(chapterHeader(ch, inCh.size, notes))
+                col.addView(grid(inCh.map { pageCard(it, notes, big) }, if (big) 1 else 2))
+            }
+            ScrollView(this).apply { addView(col); bookScroll = this; post { scrollTo(0, keepY) } }
+        }
 
-        val pick = orderPick
-        if (pick != null && merging) {
-            setStatus(tr("Tik de pagina's aan die erbij moeten (${pick.size} gekozen). De eerste is de basis, de rest komt erbij in de volgorde waarin je tikt.",
-                "Tap the pages to combine (${pick.size} picked). The first is the base, the others are added in the order you tap them."))
-            return scaffold(header(titleCol, back = true), body, listOf(
-                Action(tr("Voeg samen", "Merge"), R.drawable.ic_merge) {
-                    val byId = notes.associateBy { it.id }
-                    val chosen = pick.mapNotNull { byId[it] }
-                    if (chosen.size < 2) return@Action toast(tr("Kies minstens twee pagina's", "Pick at least two pages"))
-                    // the others live on inside the first; keep their raw pad data
-                    val merged = chosen.drop(1).fold(chosen[0]) { acc, o -> mergeNotes(acc, o) }
-                    store.save(merged)
-                    chosen.drop(1).forEach { store.delete(it.id, keepRaw = true) }
-                    orderPick = null; merging = false
-                    setStatus(tr("${chosen.size} pagina's samengevoegd", "${chosen.size} pages merged"))
-                    showBook(id)
-                },
-                Action(tr("Annuleer", "Cancel"), R.drawable.ic_delete) { orderPick = null; merging = false; setStatus(""); showBook(id) },
-            ))
-        }
-        if (pick != null) {
-            setStatus(tr("Tik de pagina's aan in de volgorde die je wilt (${pick.size} gekozen), dan Klaar. Niet aangetikte pagina's komen erachter.",
-                "Tap the pages in the order you want (${pick.size} picked), then Done. Pages you don't tap go after them."))
-            return scaffold(header(titleCol, back = true), body, listOf(
-                Action(tr("Klaar", "Done"), R.drawable.ic_list) {
-                    val byId = notes.associateBy { it.id }
-                    applyOrder(pick.mapNotNull { byId[it] } + notes.filter { it.id !in pick })
-                    orderPick = null
-                    setStatus(tr("Volgorde opgeslagen", "Order saved"))
-                    showBook(id)
-                },
-                Action(tr("Annuleer", "Cancel"), R.drawable.ic_delete) { orderPick = null; setStatus(""); showBook(id) },
-            ))
-        }
+        if (sel != null) return scaffold(header(titleCol, back = true), body, selectionActions(sel, notes, book),
+            tr("${sel.size} geselecteerd", "${sel.size} selected"))
+        if (dragMode) return scaffold(header(titleCol, back = true), body, listOf(
+            Action(tr("Klaar", "Done"), R.drawable.ic_list) { dragMode = false; showBook(id) },
+        ), tr("Sleep een pagina aan ⠿ naar een plek of hoofdstuk", "Drag a page by ⠿ to a place or chapter"))
 
         val actions = arrayListOf(
             Action(tr("Synchroniseer", "Sync"), R.drawable.ic_sync) { startSync(book?.id ?: "") },
@@ -608,20 +633,101 @@ class MainActivity : Activity() {
             actions.add(Action(tr("Verwijder", "Delete"), R.drawable.ic_delete) {
                 AlertDialog.Builder(this).setMessage(tr("Notitieblok verwijderen? De pagina's blijven bewaard bij de losse pagina's.", "Delete this notebook? Its pages are kept under loose pages."))
                     .setPositiveButton(tr("Verwijderen", "Delete")) { _, _ ->
-                        notes.forEach { it.notebookId = ""; store.save(it) }
+                        notes.forEach { it.notebookId = ""; it.chapter = ""; store.save(it) }
                         books.delete(book.id)
                         showHome()
                     }
                     .setNegativeButton(tr("Annuleren", "Cancel"), null).show()
             })
         }
-        val swatch = if (book == null) null else View(this).apply {
-            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(book.color); setStroke(dp(2), Ui.LINE) }
-            contentDescription = tr("Kaftkleur", "Cover colour")
-            layoutParams = LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(8) }
-            setOnClickListener { pickColor(book.color) { c -> book.color = c; books.save(); showBook(id) } }
+        val trailing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(icon(if (big) R.drawable.ic_grid else R.drawable.ic_list, Ui.INK).apply {
+                setPadding(dp(6), dp(6), dp(6), dp(6))
+                contentDescription = if (big) tr("Raster", "Grid") else tr("Lijst", "List")
+                ripple(this)
+                setOnClickListener { prefs.pageView = if (big) "grid" else "list"; showBook(id) }
+            }, LinearLayout.LayoutParams(dp(36), dp(36)))
+            if (book != null) addView(View(context).apply {
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(book.color); setStroke(dp(2), Ui.LINE) }
+                contentDescription = tr("Kaftkleur", "Cover colour")
+                setOnClickListener { pickColor(book.color) { c -> book.color = c; books.save(); showBook(id) } }
+            }, LinearLayout.LayoutParams(dp(32), dp(32)).apply { marginStart = dp(8) })
         }
-        scaffold(header(titleCol, back = true, trailing = swatch), body, actions)
+        scaffold(header(titleCol, back = true, trailing = trailing), body, actions,
+            book?.title?.ifBlank { null } ?: tr("Losse pagina's", "Loose pages"))
+    }
+
+    /** The buttons while pages are selected; [sel] is the order they were tapped in (the first is the base of a merge). */
+    private fun selectionActions(sel: ArrayList<String>, notes: List<Note>, book: Notebook?): List<Action> {
+        val chosen = sel.mapNotNull { id -> notes.find { it.id == id } }
+        val id = book?.id ?: ""
+        fun done(msg: String) { selected = null; if (msg.isNotEmpty()) popup(msg); showBook(id) }
+        val list = arrayListOf(
+            Action(tr("Voeg samen", "Merge"), R.drawable.ic_merge) {
+                if (chosen.size < 2) return@Action toast(tr("Kies minstens twee pagina's", "Pick at least two pages"))
+                // the others live on inside the first; keep their raw pad data
+                val merged = chosen.drop(1).fold(chosen[0]) { acc, o -> mergeNotes(acc, o) }
+                store.save(merged)
+                chosen.drop(1).forEach { store.delete(it.id, keepRaw = true) }
+                thumbs.evictAll()
+                done(tr("${chosen.size} pagina's samengevoegd", "${chosen.size} pages merged"))
+            },
+            Action(tr("Hoofdstuk", "Chapter"), R.drawable.ic_folder) { chapterDialog(chosen, notes) { done("") } },
+            Action(tr("Verplaats", "Move"), R.drawable.ic_book) { moveDialog(chosen) { done(tr("Verplaatst", "Moved")) } },
+            Action(tr("Orden", "Order"), R.drawable.ic_list) {
+                // the picked pages, in the order tapped, go where the first of them is now
+                val rest = notes.filter { it.id !in sel }
+                val at = notes.indexOfFirst { it.id in sel }.coerceIn(0, rest.size)
+                applyOrder(rest.take(at) + chosen + rest.drop(at))
+                done(tr("Volgorde opgeslagen", "Order saved"))
+            },
+            Action(tr("Slepen", "Drag"), R.drawable.ic_drag) { selected = null; dragMode = true; showBook(id) },
+            Action(tr("Deel", "Share"), R.drawable.ic_share) { exportBook(book?.title?.ifBlank { null } ?: "Spark Ink", chosen) },
+            Action(tr("Wis", "Delete"), R.drawable.ic_delete) {
+                AlertDialog.Builder(this).setMessage(tr("${pages(chosen.size)} definitief verwijderen?", "Delete ${pages(chosen.size)} for good?"))
+                    .setPositiveButton(tr("Verwijderen", "Delete")) { _, _ ->
+                        chosen.forEach { store.delete(it.id); if (prefs.appendTo == it.id) prefs.appendTo = null }
+                        done("")
+                    }
+                    .setNegativeButton(tr("Annuleren", "Cancel"), null).show()
+            },
+        )
+        chosen.singleOrNull()?.takeIf { it.mergedFrom.isNotBlank() }?.let { m ->
+            list.add(1, Action(tr("Splits", "Split"), R.drawable.ic_merge) { unmerge(m); selected = null; showBook(id) })
+        }
+        return list
+    }
+
+    private fun chapterHeader(ch: String, count: Int, all: List<Note>) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(dp(8), dp(16), dp(8), dp(4))
+        addView(icon(R.drawable.ic_folder, Ui.ACCENT, 18))
+        addView(label(ch.ifEmpty { tr("Zonder hoofdstuk", "No chapter") }, 16f, Ui.INK, bold = true).apply { setPadding(dp(8), 0, 0, 0) },
+            LinearLayout.LayoutParams(0, WRAP, 1f))
+        addView(label(pages(count), 12f, Ui.MUTED))
+        if (ch.isNotEmpty()) setOnClickListener {
+            askName(tr("Hoofdstuk hernoemen", "Rename chapter"), ch, tr("Bijv. Vergaderingen", "E.g. Meetings")) { name ->
+                all.filter { it.chapter == ch }.forEach { it.chapter = name; store.save(it) }
+                showBook(openBook ?: "")
+            }
+        }
+        if (dragMode) dropTarget(this) { from -> movePage(from, null, ch, all) }
+    }
+
+    private fun chapterDialog(chosen: List<Note>, all: List<Note>, done: () -> Unit) {
+        val existing = all.map { it.chapter }.filter { it.isNotEmpty() }.distinct()
+        val labels = existing + tr("+ Nieuw hoofdstuk…", "+ New chapter…") + tr("Geen hoofdstuk", "No chapter")
+        fun put(ch: String) { chosen.forEach { it.chapter = ch; store.save(it) }; done() }
+        AlertDialog.Builder(this).setTitle(tr("Hoofdstuk", "Chapter")).setItems(labels.toTypedArray()) { _, i ->
+            when {
+                i < existing.size -> put(existing[i])
+                i == existing.size -> askName(tr("Nieuw hoofdstuk", "New chapter"), "", tr("Bijv. Vergaderingen, Ideeën", "E.g. Meetings, Ideas")) { put(it) }
+                else -> put("")
+            }
+        }.show()
     }
 
     private fun pickColor(current: Int, onPick: (Int) -> Unit) {
@@ -647,61 +753,95 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
-    /** [inBook]: the pages of the open notebook, in order, so this card can be dragged among them. */
-    private fun pageCard(n: Note, inBook: List<Note>? = null) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        val pick = orderPick
-        val picked = pick?.indexOf(n.id) ?: -1
-        background = rounded(Ui.SURFACE, 12, if (picked >= 0) Ui.ACCENT else null)
-        if (picked >= 0) addView(label("${picked + 1}", 16f, Ui.ACCENT, bold = true).apply { setPadding(dp(2), 0, 0, dp(4)) })
-        elevation = dp(2).toFloat()
-        setPadding(dp(8), dp(8), dp(8), dp(10))
-        val img = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        addView(img, LinearLayout.LayoutParams(MATCH, dp(210)))
-        loadThumb(n, img)
-        addView(label(dateOf(n), 12f, Ui.MUTED).apply { setPadding(dp(2), dp(6), 0, 0) })
-        n.text.lineSequence().firstOrNull { it.isNotBlank() }?.let {
-            addView(label(it, 13f, Ui.INK).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), 0, 0, 0) })
+    /**
+     * [inBook]: the pages of the open notebook, in order; [big]: one page per row, as large as fits.
+     * In a notebook a long press selects the page; in drag mode the ⠿ handle drags it.
+     */
+    private fun pageCard(n: Note, inBook: List<Note>? = null, big: Boolean = false) = FrameLayout(this).apply {
+        val card = this
+        val sel = selected
+        val picked = sel?.indexOf(n.id) ?: -1
+        val box = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            background = rounded(Ui.SURFACE, 12, if (picked >= 0) Ui.ACCENT else null)
+            elevation = dp(2).toFloat()
+            setPadding(dp(8), dp(8), dp(8), dp(10))
+            val img = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER; adjustViewBounds = big }
+            if (big) {
+                img.minimumHeight = dp(300)
+                addView(img, LinearLayout.LayoutParams(MATCH, WRAP))
+                loadThumb(n, img, 1100)
+            } else {
+                addView(img, LinearLayout.LayoutParams(MATCH, dp(210)))
+                loadThumb(n, img)
+            }
+            addView(label(dateOf(n), 12f, Ui.MUTED).apply { setPadding(dp(2), dp(6), 0, 0) })
+            n.text.lineSequence().firstOrNull { it.isNotBlank() }?.let {
+                addView(label(it, 13f, Ui.INK).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), 0, 0, 0) })
+            }
+            if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), dp(2), 0, 0) })
+            ripple(this)
         }
-        if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), dp(2), 0, 0) })
-        ripple(this)
+        addView(box, FrameLayout.LayoutParams(MATCH, WRAP))
+        // selection order, top left
+        if (sel != null) addView(label(if (picked >= 0) "${picked + 1}" else "", 13f, Ui.BG, bold = true).apply {
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(if (picked >= 0) Ui.ACCENT else 0x66000000)
+                setStroke(dp(2), if (picked >= 0) Ui.ACCENT else Color.WHITE)
+            }
+            elevation = dp(4).toFloat()
+        }, FrameLayout.LayoutParams(dp(28), dp(28), Gravity.TOP or Gravity.START).apply { setMargins(dp(6), dp(6), 0, 0) })
         when {
-            pick != null -> setOnClickListener {
-                if (picked >= 0) pick.remove(n.id) else pick.add(n.id)
+            sel != null -> box.setOnClickListener {
+                if (picked >= 0) sel.remove(n.id) else sel.add(n.id)
+                if (sel.isEmpty()) selected = null
                 showBook(openBook ?: "")
             }
+            inBook != null && dragMode -> {
+                box.setOnClickListener { openNote(n) }
+                addView(icon(R.drawable.ic_drag, Ui.INK, 22).apply {
+                    setPadding(dp(7), dp(7), dp(7), dp(7))
+                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Ui.ACCENT_SOFT) }
+                    elevation = dp(4).toFloat()
+                    contentDescription = tr("Slepen", "Drag")
+                    // the handle starts the drag at once, the rest of the card still scrolls
+                    setOnTouchListener { _, e ->
+                        if (e.actionMasked == MotionEvent.ACTION_DOWN) startDragAndDrop(ClipData.newPlainText("spark", n.id), View.DragShadowBuilder(card), n.id, 0)
+                        true
+                    }
+                }, FrameLayout.LayoutParams(dp(36), dp(36), Gravity.TOP or Gravity.END).apply { setMargins(0, dp(6), dp(6), 0) })
+                dropTarget(this) { from -> movePage(from, n.id, n.chapter, inBook) }
+            }
             inBook != null -> {
-                setOnClickListener { openNote(n) }
-                // drag onto another page to move it there; let go in place to tap the order instead
-                draggable(this, n.id, onDrop = { from, to ->
-                    val list = inBook.toMutableList()
-                    val moved = list.first { it.id == from }
-                    list.remove(moved)
-                    list.add(list.indexOfFirst { it.id == to }.let { if (it < 0) list.size else it }, moved)
-                    applyOrder(list)
-                    showBook(openBook ?: "")
-                }) { pageMenu(n) }
+                box.setOnClickListener { openNote(n) }
+                box.setOnLongClickListener { selected = arrayListOf(n.id); sheetOpen = true; showBook(openBook ?: ""); true }
             }
             else -> {
-                setOnClickListener { openNote(n) }
-                setOnLongClickListener { moveDialog(n) { refresh() }; true }
+                box.setOnClickListener { openNote(n) }
+                box.setOnLongClickListener { moveDialog(listOf(n)) { refresh() }; true }
             }
         }
     }
 
-    private fun pageMenu(n: Note) {
-        AlertDialog.Builder(this).setItems(arrayOf(
-            tr("Verplaats naar ander notitieblok", "Move to another notebook"),
-            tr("Volgorde aanpassen", "Change the order"),
-            tr("Samenvoegen met andere pagina's", "Merge with other pages"),
-        ) + (if (n.mergedFrom.isBlank()) emptyArray() else arrayOf(tr("Samenvoegen ongedaan maken", "Undo merge")))) { _, i ->
-            when (i) {
-                3 -> { unmerge(n); showBook(openBook ?: "") }
-                0 -> moveDialog(n) { toast(tr("Verplaatst", "Moved")); showBook(openBook ?: "") }
-                1 -> { merging = false; orderPick = arrayListOf(); showBook(openBook ?: "") }
-                else -> { merging = true; orderPick = arrayListOf(n.id); showBook(openBook ?: "") }
-            }
-        }.show()
+    /**
+     * Put page [from] in [chapter]: next to page [target] (after it when moved down, before it when
+     * moved up), or at the end of the chapter when dropped on its heading.
+     * shortcut: no auto-scroll while dragging; drop on a chapter heading or scroll first if the list is long.
+     */
+    private fun movePage(from: String, target: String?, chapter: String, all: List<Note>) {
+        if (from == target) return
+        val list = all.toMutableList()
+        val moved = list.firstOrNull { it.id == from } ?: return
+        val down = target != null && list.indexOf(moved) < list.indexOfFirst { it.id == target }
+        list.remove(moved)
+        moved.chapter = chapter
+        val at = if (target == null) list.indexOfLast { it.chapter == chapter } + 1
+                 else list.indexOfFirst { it.id == target } + if (down) 1 else 0
+        list.add(if (target == null && at <= 0) list.size else at, moved)
+        applyOrder(list)
+        showBook(openBook ?: "")
     }
 
     /** Store [notes] in this order; pages synced later still come first (see [Note.sortKey]). */
@@ -711,41 +851,42 @@ class MainActivity : Activity() {
         notes.forEachIndexed { i, n -> n.order = base + i; store.save(n) }
     }
 
-    /**
-     * Long press starts dragging [v]; dropping it on another card calls [onDrop] (dragged key, target
-     * key), letting go on itself calls [onSelf].
-     * shortcut: no auto-scroll while dragging, fine for a screenful of cards; add it if lists get long.
-     */
+    /** Long press starts dragging [v]; dropping it on another card calls [onDrop] (dragged key, target key), on itself [onSelf]. */
     private fun draggable(v: View, key: String, onDrop: (String, String) -> Unit, onSelf: () -> Unit) {
         v.setOnLongClickListener {
             it.startDragAndDrop(ClipData.newPlainText("spark", key), View.DragShadowBuilder(it), key, 0)
             true
         }
-        v.setOnDragListener { view, e ->
-            when (e.action) {
-                DragEvent.ACTION_DRAG_STARTED -> e.localState is String
-                DragEvent.ACTION_DRAG_ENTERED -> { view.alpha = 0.5f; true }
-                DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> { view.alpha = 1f; true }
-                DragEvent.ACTION_DROP -> {
-                    view.alpha = 1f
-                    val from = e.localState as String
-                    // post: the drag must finish before the screen is rebuilt
-                    main.post { if (from == key) onSelf() else onDrop(from, key) }
-                    true
-                }
-                else -> true
+        dropTarget(v) { from -> if (from == key) onSelf() else onDrop(from, key) }
+    }
+
+    /** [v] accepts a dragged card; [onDrop] gets the dragged key once the drag has finished. */
+    private fun dropTarget(v: View, onDrop: (String) -> Unit) = v.setOnDragListener { view, e ->
+        when (e.action) {
+            DragEvent.ACTION_DRAG_STARTED -> e.localState is String
+            DragEvent.ACTION_DRAG_ENTERED -> { view.alpha = 0.5f; true }
+            DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> { view.alpha = 1f; true }
+            DragEvent.ACTION_DROP -> {
+                view.alpha = 1f
+                val from = e.localState as String
+                // post: the drag must finish before the screen is rebuilt
+                main.post { onDrop(from) }
+                true
             }
+            else -> true
         }
     }
 
-    private fun moveDialog(n: Note, done: () -> Unit) {
+    private fun moveDialog(ns: List<Note>, done: () -> Unit) {
         val list = books.all()
         val labels = listOf(tr("Losse pagina's", "Loose pages")) + list.map { it.title.ifBlank { tr("Naamloos", "Untitled") } } + tr("+ Nieuw notitieblok…", "+ New notebook…")
+        // chapters belong to a notebook: a moved page starts without one
+        fun put(bookId: String) { ns.forEach { it.notebookId = bookId; it.chapter = ""; store.save(it) }; done() }
         AlertDialog.Builder(this).setTitle(tr("Verplaats naar", "Move to")).setItems(labels.toTypedArray()) { _, i ->
             when {
-                i == 0 -> { n.notebookId = ""; store.save(n); done() }
-                i <= list.size -> { n.notebookId = list[i - 1].id; store.save(n); done() }
-                else -> askName(tr("Nieuw notitieblok", "New notebook"), "") { n.notebookId = books.create(it).id; store.save(n); done() }
+                i == 0 -> put("")
+                i <= list.size -> put(list[i - 1].id)
+                else -> askName(tr("Nieuw notitieblok", "New notebook"), "") { put(books.create(it).id) }
             }
         }.show()
     }
@@ -782,7 +923,7 @@ class MainActivity : Activity() {
             if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT))
             if (prefs.appendTo == n.id) addView(label(tr("Wordt aangevuld bij de volgende sync", "Will be extended at the next sync"), 12f, Ui.ACCENT, bold = true))
         }
-        val todo = Todo.items(n.text).isNotEmpty()
+        val todo = isList(n)
         val tabs = if (todo) listOf(tr("Pagina", "Page"), tr("Lijst", "List"), tr("Tekst", "Text")) else listOf(tr("Pagina", "Page"), tr("Tekst", "Text"))
         val selected = if (!showText) 0 else if (todo && showList) 1 else tabs.size - 1
         val toggle = segmented(tabs, selected) { i -> saveEditor(); showText = i > 0; showList = todo && i == 1; showNote(n) }
@@ -894,13 +1035,13 @@ class MainActivity : Activity() {
     private fun openNote(n: Note) {
         inTodos = false
         openBook = n.notebookId
-        showList = Todo.items(n.text).isNotEmpty()
+        showList = isList(n)
         showText = showList
         showNote(n)
     }
 
     /** Tickable list of the tasks in [n]; ticking rewrites "- [ ]" / "- [x]" in its text. */
-    private fun checklist(n: Note, withAdd: Boolean) = LinearLayout(this).apply {
+    private fun checklist(n: Note, withAdd: Boolean, after: () -> Unit = { showNote(n) }) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         for (item in Todo.items(n.text)) addView(CheckBox(context).apply {
             text = item.text
@@ -927,24 +1068,30 @@ class MainActivity : Activity() {
                     n.text = Todo.add(n.text, t)
                     n.tags = Todo.withTag(n.tags, n.text)
                     store.save(n)
-                    showNote(n)
+                    after()
                 }
                 true
             }
         })
     }
 
-    private fun todoCard(notes: List<Note>): View? {
-        val open = notes.flatMap { n -> Todo.items(n.text).filter { !it.done } }
-        if (open.isEmpty()) return null
+    private fun isList(n: Note) = Todo.items(n.text).isNotEmpty() || n.tags.split(",").any { it.trim().equals(Todo.TAG, ignoreCase = true) }
+
+    /** Name of a list: its first line that is not a task, else the date. */
+    private fun listTitle(n: Note) = n.text.lines().map { it.trim().removePrefix("#").trim() }
+        .firstOrNull { it.isNotEmpty() && !it.startsWith("- [") } ?: dateOf(n)
+
+    private fun todoCard(notes: List<Note>): View {
+        val lists = notes.filter { isList(it) }
+        val open = lists.sumOf { n -> Todo.items(n.text).count { !it.done } }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             minimumHeight = dp(176)
             background = rounded(Ui.ACCENT_SOFT, 14)
             setPadding(dp(12), dp(12), dp(12), dp(12))
-            addView(label(tr("Taken", "Tasks"), 16f, Ui.INK, bold = true))
-            addView(label("${open.size} open", 12f, Ui.ACCENT))
-            for (item in open.take(4)) addView(label("☐ " + item.text, 13f, Ui.INK).apply {
+            addView(label(tr("Lijsten", "Lists"), 16f, Ui.INK, bold = true))
+            addView(label(if (lists.isEmpty()) tr("Nog geen lijsten", "No lists yet") else tr("${lists.size} · $open open", "${lists.size} · $open open"), 12f, Ui.ACCENT))
+            for (l in lists.take(4)) addView(label("☐ " + listTitle(l), 13f, Ui.INK).apply {
                 maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0)
             })
             ripple(this)
@@ -952,27 +1099,41 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Every page with open tasks, tickable in one place. */
+    /** Every to-do list, each in its own card, tickable and extendable in one place. */
     private fun showTodos() {
         saveEditor()
         current = null; editor = null; openBook = null; inSettings = false; inTodos = true
-        val pagesWithTasks = store.all().filter { n -> Todo.items(n.text).any { !it.done } }
+        val lists = store.all().filter { isList(it) }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        for (n in pagesWithTasks) {
+        for (n in lists) {
             val book = books.get(n.notebookId)?.title?.ifBlank { tr("Naamloos", "Untitled") } ?: tr("Losse pagina's", "Loose pages")
-            col.addView(label("$book · ${dateOf(n)}", 12f, Ui.MUTED, bold = true).apply {
-                setPadding(dp(4), dp(16), 0, dp(4))
-                setOnClickListener { openNote(n) }
-            })
-            col.addView(checklist(n, withAdd = false).apply {
+            val open = Todo.items(n.text).count { !it.done }
+            col.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
                 background = rounded(Ui.SURFACE, 12)
-                setPadding(dp(12), dp(4), dp(12), dp(4))
-            })
+                setPadding(dp(14), dp(10), dp(14), dp(6))
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(label(listTitle(n), 17f, Ui.INK, bold = true))
+                    addView(label("$book · $open open", 12f, Ui.MUTED))
+                    ripple(this)
+                    setOnClickListener { openNote(n) }
+                })
+                addView(checklist(n, withAdd = true) { showTodos() })
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
         }
-        val body = if (pagesWithTasks.isEmpty()) label(tr("Geen open taken. Alles is afgevinkt!", "No open tasks. Everything is ticked off!"), 15f, Ui.MUTED)
+        val body = if (lists.isEmpty()) label(tr("Nog geen lijsten. Maak er een, of schrijf ‘To do’ of vakjes op de Folio.", "No lists yet. Make one, or write ‘To do’ or boxes on the Folio."), 15f, Ui.MUTED)
             .apply { gravity = Gravity.CENTER; setPadding(dp(24), dp(48), dp(24), 0) }
         else ScrollView(this).apply { addView(col) }
-        scaffold(header(label(tr("Taken", "Tasks"), 24f, Ui.INK, bold = true), back = true), body, emptyList())
+        scaffold(header(label(tr("Lijsten", "Lists"), 24f, Ui.INK, bold = true), back = true), body, listOf(
+            Action(tr("Nieuwe lijst", "New list"), R.drawable.ic_add) {
+                askName(tr("Nieuwe lijst", "New list"), "", tr("Bijv. Boodschappen, Klussen", "E.g. Groceries, Chores")) { t ->
+                    val now = System.currentTimeMillis()
+                    store.save(Note("list$now", now / 1000, 21000, 14800, emptyList(), 0, t.ifBlank { tr("Lijst", "List") }, "hand", tags = Todo.TAG))
+                    showTodos()
+                }
+            },
+        ), tr("Lijsten", "Lists"))
     }
 
     private fun findShapes(n: Note, done: () -> Unit) {
@@ -1017,7 +1178,7 @@ class MainActivity : Activity() {
         }
         return Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
             listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
-            listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn, n.order, originals.toString())
+            listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn, n.order, originals.toString(), n.chapter)
     }
 
     /** Put the pages of a merge back as they were before it (later edits to the merged page are lost). */
@@ -1142,14 +1303,14 @@ class MainActivity : Activity() {
                 view.sketch = sketch()
             }) { r ->
                 busy = false
-                r.onSuccess { setStatus(tr("Live gestopt", "Live stopped")) }.onFailure { setStatus(tr("Live mislukt: ${it.message}", "Live failed: ${it.message}")) }
+                r.onSuccess { popup(tr("Live gestopt", "Live stopped")) }.onFailure { popup(tr("Live mislukt: ${it.message}", "Live failed: ${it.message}")) }
             }
         }
     }
 
     // ---- OCR -------------------------------------------------------------------------
 
-    private fun runOcr(n: Note, method: String, onFail: () -> Unit = {}, lang: String = prefs.language, done: () -> Unit) {
+    private fun runOcr(n: Note, method: String, onFail: () -> Unit = {}, lang: String = prefs.ocrLanguage, done: () -> Unit) {
         if (busy) return toast(tr("Even geduld, er loopt nog iets", "One moment, something is still running"))
         busy = true
         setStatus(if (method == "claude") tr("Claude leest het handschrift…", "Claude is reading the handwriting…") else tr("ML Kit leest het handschrift…", "ML Kit is reading the handwriting…"))
@@ -1310,7 +1471,7 @@ class MainActivity : Activity() {
                 startWatching()
                 r.onSuccess { n ->
                     val extra = appended?.let { tr(" (aangevuld: ${dateOf(it)})", " (extended: ${dateOf(it)})") } ?: ""
-                    setStatus(if (n == 0) tr("Geen nieuwe pagina's op de Folio", "No new pages on the Folio") else tr("${pages(n)} opgehaald$extra", "${pages(n)} fetched$extra"))
+                    popup(if (n == 0) tr("Geen nieuwe pagina's op de Folio", "No new pages on the Folio") else tr("${pages(n)} opgehaald$extra", "${pages(n)} fetched$extra"))
                     // a page whose text was typed by hand keeps that text
                     if (n > 0) autoOcr(fresh.filter { it.source != "hand" }.reversed(), finished = {
                         shapesAll(if (prefs.autoShapes) fresh else emptyList()) {
@@ -1318,7 +1479,7 @@ class MainActivity : Activity() {
                             if (prefs.driveAuto) uploadToDrive(fresh, quiet = true)
                         }
                     }) else refresh()
-                }.onFailure { setStatus(tr("Synchroniseren mislukt: ${it.message}", "Sync failed: ${it.message}")) }
+                }.onFailure { popup(tr("Synchroniseren mislukt: ${it.message}", "Sync failed: ${it.message}")) }
             }
         }
     }
@@ -1467,6 +1628,8 @@ class MainActivity : Activity() {
         saveEditor()
         current = null; editor = null; openBook = null; inSettings = true
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dp(24)) }
+        // the title scrolls away with the settings
+        col.addView(header(label(tr("Instellingen", "Settings"), 24f, Ui.INK, bold = true), back = true))
         fun section(title: String): LinearLayout {
             col.addView(label(title.uppercase(), 12f, Ui.MUTED, bold = true).apply { setPadding(dp(4), dp(16), 0, dp(6)) })
             return LinearLayout(this).apply {
@@ -1485,27 +1648,28 @@ class MainActivity : Activity() {
             }
         }
         fun note(box: LinearLayout, s: String) = box.addView(label(s, 13f, Ui.MUTED).apply { setPadding(0, dp(6), 0, dp(4)) })
+        fun dropdown(box: LinearLayout, title: String, options: List<Pair<String, String>>, current: String, onPick: (String) -> Unit) {
+            box.addView(label(title, 13f, Ui.MUTED).apply { setPadding(0, dp(10), 0, 0) })
+            box.addView(Spinner(this).apply {
+                adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, options.map { it.second })
+                setSelection(options.indexOfFirst { it.first == current }.coerceAtLeast(0))
+                onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                    override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) = onPick(options[pos].first)
+                    override fun onNothingSelected(p: AdapterView<*>?) {}
+                }
+            })
+        }
 
-        val language = section(tr("Taal", "Language"))
-        note(language, tr("Taal van de app en van je handschrift (ML Kit). Claude herkent de taal van je handschrift zelf.",
-            "Language of the app and of your handwriting (ML Kit). Claude detects the handwriting language by itself."))
-        val langs = listOf("nl" to "Nederlands", "en" to "English")
-        language.addView(RadioGroup(this).apply {
-            orientation = RadioGroup.HORIZONTAL
-            langs.forEachIndexed { i, (code, name) ->
-                addView(RadioButton(context).apply { id = 200 + i; text = name; isChecked = prefs.language == code })
-            }
-            setOnCheckedChangeListener { _, id ->
-                saveSettings?.invoke()
-                prefs.language = langs[(id - 200).coerceIn(0, 1)].first
-                Lang.en = prefs.language == "en"
-                showSettings()
-            }
-        })
+        val app = section("App")
+        app.addView(label(tr("Versie ${BuildConfig.GIT_SHA}", "Version ${BuildConfig.GIT_SHA}"), 20f, Ui.INK, bold = true).apply { setPadding(0, dp(4), 0, dp(2)) })
+        val ghToken = field(app, tr("GitHub-token (alleen voor updates)", "GitHub token (only for updates)"), prefs.githubToken, secret = true)
+        app.addView(rowOf(
+            pill(tr("Update zoeken", "Check for update"), R.drawable.ic_download) { saveSettings?.invoke(); checkForUpdate() },
+            pill("Log", R.drawable.ic_list) { showLog() },
+        ))
 
         val folio = section("Folio")
         folio.addView(label(if (pad.isPaired) tr("Gekoppeld met ${prefs.padName ?: "Folio"}", "Paired with ${prefs.padName ?: "Folio"}") else tr("Nog geen Folio gekoppeld", "No Folio paired yet"), 15f, Ui.INK, bold = true))
-        note(folio, tr("Koppelen: houd de knop 6 seconden ingedrukt tot het lampje blauw knippert. Knippert het blauw-oranje, dan is het geheugen vol: kies dan Wissen + resetten (alle pagina's op de Folio gaan verloren).", "Pairing: hold the button for 6 seconds until the light blinks blue. If it blinks blue and orange, the memory is full: choose Erase + reset (all pages on the Folio are lost)."))
         if (prefs.padBattery >= 0) note(folio, tr("Batterij ${prefs.padBattery}% (bij de laatste verbinding)", "Battery ${prefs.padBattery}% (at the last connection)"))
         folio.addView(rowOf(
             pill(tr("Batterij", "Battery"), R.drawable.ic_bluetooth) { padCommand { pad.battery({ setStatus(it) }) { r ->
@@ -1533,25 +1697,61 @@ class MainActivity : Activity() {
             },
         ))
 
+        val language = section(tr("Taal", "Language"))
+        dropdown(language, tr("Taal van de app", "App language"), listOf("nl" to "Nederlands", "en" to "English"), prefs.language) { code ->
+            if (code != prefs.language) {
+                saveSettings?.invoke()
+                prefs.language = code
+                Lang.en = code == "en"
+                showSettings()
+            }
+        }
+        dropdown(language, tr("Taal van je handschrift (ML Kit)", "Handwriting language (ML Kit)"), listOf(
+            "nl" to "Nederlands", "en" to "English", "de" to "Deutsch", "fr" to "Français", "es" to "Español", "it" to "Italiano",
+        ), prefs.ocrLanguage) { prefs.ocrLanguage = it }
+        note(language, tr("Claude herkent de taal van je handschrift zelf.", "Claude detects the handwriting language by itself."))
+
         val inkBox = section(tr("Inkt", "Ink"))
-        note(inkBox, tr("Kleur en dikte van de lijnen op het scherm en in exports. De tekstherkenning gebruikt altijd zwart.", "Colour and width of the lines on screen and in exports. Text recognition always uses black."))
+        note(inkBox, tr("Tik op een kleur om hem te kiezen; nog eens tikken wisselt dun, normaal en dik.", "Tap a colour to pick it; tap again to switch thin, normal and thick."))
+        val widths = listOf(0.25f, 0.35f, 0.6f)
+        val wi = widths.indexOf(prefs.inkWidth).let { if (it < 0) 1 else it }
         val inks = listOf(0xFF000000.toInt(), 0xFF1F4FB5.toInt(), 0xFFB3261E.toInt(), 0xFF2E7D32.toInt(), 0xFF6A1B9A.toInt())
+            .let { if (prefs.inkColor in it) it else it + prefs.inkColor }
+        fun setInk(c: Int, w: Float) { saveSettings?.invoke(); prefs.inkColor = c; prefs.inkWidth = w; thumbs.evictAll(); showSettings() }
         inkBox.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(6), 0, dp(8))
-            for (c in inks) addView(View(context).apply {
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL; setColor(c)
-                    setStroke(dp(3), if (c == prefs.inkColor) Ui.ACCENT else Ui.LINE)
-                }
-                contentDescription = tr("Inktkleur", "Ink colour")
-                setOnClickListener { saveSettings?.invoke(); prefs.inkColor = c; thumbs.evictAll(); showSettings() }
-            }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(12) })
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, dp(10))
+            for (c in inks) {
+                val on = c == prefs.inkColor
+                addView(FrameLayout(context).apply {
+                    background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(c); setStroke(dp(if (on) 3 else 1), if (on) Ui.ACCENT else Ui.LINE) }
+                    contentDescription = tr("Inktkleur", "Ink colour")
+                    // the white dot shows the line width: thin, normal or thick
+                    if (on) addView(View(context).apply { background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) } },
+                        dp(listOf(6, 10, 16)[wi]).let { FrameLayout.LayoutParams(it, it, Gravity.CENTER) })
+                    setOnClickListener { setInk(c, if (on) widths[(wi + 1) % widths.size] else prefs.inkWidth) }
+                }, LinearLayout.LayoutParams(dp(36), dp(36)).apply { marginEnd = dp(10) })
+            }
+            addView(ColorWheel(context, null).apply {
+                contentDescription = tr("Eigen kleur", "Custom colour")
+                setOnClickListener { pickInk(prefs.inkColor) { c -> setInk(c, prefs.inkWidth) } }
+            }, LinearLayout.LayoutParams(dp(36), dp(36)))
         })
-        val widths = listOf(0.25f, 0.35f, 0.6f)
-        inkBox.addView(segmented(listOf(tr("Dun", "Thin"), tr("Normaal", "Normal"), tr("Dik", "Thick")), widths.indexOf(prefs.inkWidth).coerceAtLeast(0)) { i ->
-            saveSettings?.invoke(); prefs.inkWidth = widths[i]; thumbs.evictAll(); showSettings()
-        }, LinearLayout.LayoutParams(WRAP, WRAP))
+        inkBox.addView(FrameLayout(this).apply {
+            background = rounded(Color.WHITE, 14)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            addView(TextView(context).apply {
+                text = tr("Voorbeeld", "Preview")
+                textSize = 30f
+                typeface = Typeface.create("casual", Typeface.NORMAL)
+                setTextColor(prefs.inkColor)
+                gravity = Gravity.CENTER
+                // thicker ink: the letters get an outline in the same colour
+                paint.style = Paint.Style.FILL_AND_STROKE
+                paint.strokeWidth = listOf(0f, 1f, 2.5f)[wi] * resources.displayMetrics.density
+            }, FrameLayout.LayoutParams(MATCH, WRAP))
+        }, LinearLayout.LayoutParams(MATCH, WRAP))
 
         val ocr = section(tr("Tekstherkenning", "Text recognition"))
         note(ocr, tr("Automatisch omzetten naar tekst na synchroniseren", "Convert to text automatically after syncing"))
@@ -1561,6 +1761,16 @@ class MainActivity : Activity() {
             group.addView(RadioButton(this).apply { id = 100 + i; this.text = text; isChecked = prefs.autoOcr == key })
         }
         ocr.addView(group)
+        // Claude's key and model, right under its option and only while it is chosen
+        val claudeBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(32), 0, 0, dp(6))
+            visibility = if (prefs.autoOcr == "claude") View.VISIBLE else View.GONE
+        }
+        ocr.addView(claudeBox)
+        val key = field(claudeBox, tr("Claude API-key (blijft alleen op dit toestel)", "Claude API key (stays on this phone only)"), prefs.apiKey, secret = true)
+        val model = field(claudeBox, "Claude-model", prefs.model)
+        group.setOnCheckedChangeListener { _, id -> claudeBox.visibility = if (id == 102) View.VISIBLE else View.GONE }
         val syncAuto = CheckBox(this).apply {
             text = tr("Automatisch synchroniseren zodra je op de knop van de Folio drukt (terwijl de app open is)",
                 "Sync automatically as soon as you press the Folio button (while the app is open)")
@@ -1569,8 +1779,6 @@ class MainActivity : Activity() {
         ocr.addView(syncAuto)
         val sAuto = CheckBox(this).apply { text = tr("Na synchroniseren vormen strak maken (lijnen, rechthoeken, cirkels, driehoeken)", "Draw shapes clean after syncing (lines, rectangles, circles, triangles)"); isChecked = prefs.autoShapes }
         ocr.addView(sAuto)
-        val key = field(ocr, tr("Claude API-key (blijft alleen op dit toestel)", "Claude API key (stays on this phone only)"), prefs.apiKey, secret = true)
-        val model = field(ocr, "Claude-model", prefs.model)
 
         val notion = section("Notion")
         note(notion, tr("Maak een integratie op notion.so/my-integrations en deel je database of pagina ermee via ••• > Verbindingen.", "Create an integration at notion.so/my-integrations and share your database or page with it via ••• > Connections."))
@@ -1593,14 +1801,6 @@ class MainActivity : Activity() {
             }
         }))
 
-        val app = section("App")
-        note(app, tr("Versie ${BuildConfig.GIT_SHA}. Updates hebben een GitHub-token met alleen leesrechten (Contents: Read) voor Jeroentjj/Spark-Ink nodig, omdat de repo privé is.", "Version ${BuildConfig.GIT_SHA}. Updates need a read-only GitHub token (Contents: Read) for Jeroentjj/Spark-Ink, because the repo is private."))
-        val ghToken = field(app, tr("GitHub-token (alleen voor updates)", "GitHub token (only for updates)"), prefs.githubToken, secret = true)
-        app.addView(rowOf(
-            pill(tr("Update zoeken", "Check for update"), R.drawable.ic_download) { saveSettings?.invoke(); checkForUpdate() },
-            pill("Log", R.drawable.ic_list) { showLog() },
-        ))
-
         saveSettings = {
             prefs.autoOcr = opts[(group.checkedRadioButtonId - 100).coerceIn(0, 2)].first
             prefs.apiKey = key.text.toString()
@@ -1613,7 +1813,36 @@ class MainActivity : Activity() {
             prefs.autoShapes = sAuto.isChecked
             prefs.autoSync = syncAuto.isChecked
         }
-        scaffold(header(label(tr("Instellingen", "Settings"), 24f, Ui.INK, bold = true), back = true), ScrollView(this).apply { addView(col) }, emptyList())
+        scaffold(View(this), ScrollView(this).apply { addView(col) }, emptyList())
+    }
+
+    /** Colour wheel: hue around the circle, white towards the middle, and a slider for how dark. */
+    private fun pickInk(start: Int, onPick: (Int) -> Unit) {
+        val hsv = FloatArray(3).also { Color.colorToHSV(start, it) }
+        val swatch = View(this)
+        fun show() { swatch.background = rounded(Color.HSVToColor(hsv), 10) }
+        val wheel = ColorWheel(this) { h, s -> hsv[0] = h; hsv[1] = s; show() }.apply { value = hsv[2] }
+        val dark = SeekBar(this).apply {
+            max = 100
+            progress = (hsv[2] * 100).toInt()
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(b: SeekBar?, p: Int, user: Boolean) { hsv[2] = p / 100f; wheel.value = hsv[2]; show() }
+                override fun onStartTrackingTouch(b: SeekBar?) {}
+                override fun onStopTrackingTouch(b: SeekBar?) {}
+            })
+        }
+        show()
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), 0)
+            addView(wheel, LinearLayout.LayoutParams(dp(240), dp(240)).apply { gravity = Gravity.CENTER_HORIZONTAL })
+            addView(label(tr("Helderheid", "Brightness"), 13f, Ui.MUTED).apply { setPadding(0, dp(12), 0, 0) })
+            addView(dark)
+            addView(swatch, LinearLayout.LayoutParams(MATCH, dp(36)).apply { topMargin = dp(8) })
+        }
+        AlertDialog.Builder(this).setTitle(tr("Eigen inktkleur", "Custom ink colour")).setView(col)
+            .setPositiveButton(tr("Kiezen", "Pick")) { _, _ -> onPick(Color.HSVToColor(hsv)) }
+            .setNegativeButton(tr("Annuleren", "Cancel"), null).show()
     }
 
     private fun showLog() {
@@ -1649,4 +1878,73 @@ private class SwipeBar(ctx: Context, private val onSwipe: (up: Boolean) -> Unit)
     override fun onInterceptTouchEvent(e: MotionEvent) = track(e)
 
     override fun onTouchEvent(e: MotionEvent): Boolean { track(e); return true }
+}
+
+/** The app's logo in a circle whose ring shows the Folio's battery (grey while not known yet). */
+private class BatteryBadge(ctx: Context, private val pct: Int) : View(ctx) {
+    private val logo = ctx.getDrawable(R.drawable.ic_launcher_foreground)
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun onDraw(c: Canvas) {
+        val s = min(width, height).toFloat()
+        val w = s * 0.09f
+        paint.style = Paint.Style.FILL
+        paint.color = Ui.SURFACE
+        c.drawCircle(s / 2, s / 2, s / 2, paint)
+        // adaptive-icon foreground: the logo sits in the middle 66 of 108 units
+        val half = (s * 0.67f).toInt()
+        val mid = (s / 2).toInt()
+        logo?.setBounds(mid - half, mid - half, mid + half, mid + half)
+        c.save()
+        c.clipPath(Path().apply { addCircle(s / 2, s / 2, s / 2 - w, Path.Direction.CW) })
+        logo?.draw(c)
+        c.restore()
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = w
+        paint.strokeCap = Paint.Cap.ROUND
+        val ring = RectF(w / 2, w / 2, s - w / 2, s - w / 2)
+        paint.color = Ui.LINE
+        c.drawArc(ring, 0f, 360f, false, paint)
+        if (pct >= 0) {
+            paint.color = when { pct <= 15 -> Ui.DANGER; pct <= 40 -> 0xFFE0B050.toInt(); else -> 0xFF7CC48A.toInt() }
+            c.drawArc(ring, -90f, 3.6f * pct, false, paint)
+        }
+    }
+}
+
+/** Hue around the circle, white towards the middle; with [onPick] it reports (hue, saturation) where touched. */
+private class ColorWheel(ctx: Context, private val onPick: ((Float, Float) -> Unit)?) : View(ctx) {
+    var value = 1f
+        set(v) { field = v; invalidate() }
+    private val hue = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val white = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val shade = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        val cx = w / 2f
+        val cy = h / 2f
+        // clockwise on screen: red, magenta, blue, cyan, green, yellow, so hue = 360 - angle
+        hue.shader = SweepGradient(cx, cy, intArrayOf(Color.RED, Color.MAGENTA, Color.BLUE, Color.CYAN, Color.GREEN, Color.YELLOW, Color.RED), null)
+        white.shader = RadialGradient(cx, cy, min(cx, cy).coerceAtLeast(1f), Color.WHITE, 0x00FFFFFF, Shader.TileMode.CLAMP)
+    }
+
+    override fun onDraw(c: Canvas) {
+        val cx = width / 2f
+        val cy = height / 2f
+        val r = min(cx, cy)
+        c.drawCircle(cx, cy, r, hue)
+        c.drawCircle(cx, cy, r, white)
+        shade.color = Color.argb(((1 - value) * 255).toInt(), 0, 0, 0)
+        c.drawCircle(cx, cy, r, shade)
+    }
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        val pick = onPick ?: return super.onTouchEvent(e)
+        parent?.requestDisallowInterceptTouchEvent(true)
+        val dx = e.x - width / 2f
+        val dy = e.y - height / 2f
+        val angle = (Math.toDegrees(atan2(dy, dx).toDouble()).toFloat() + 360f) % 360f
+        pick((360f - angle) % 360f, (hypot(dx, dy) / (min(width, height) / 2f)).coerceAtMost(1f))
+        return true
+    }
 }

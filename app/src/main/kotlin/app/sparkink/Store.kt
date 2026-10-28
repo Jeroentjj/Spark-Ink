@@ -25,6 +25,7 @@ class Note(
     var tidyOn: Boolean = true,   // show the clean shapes instead of the drawn ones
     var order: Long = Long.MIN_VALUE, // place in its notebook once the user reordered it
     var mergedFrom: String = "",  // JSON array of the original pages when this page is a merge (undo)
+    var chapter: String = "",     // chapter inside its notebook, "" = none
 ) {
     /** Position in the notebook: newest first until the user drags pages around. */
     val sortKey get() = if (order == Long.MIN_VALUE) -timestamp else order
@@ -38,7 +39,7 @@ class Note(
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("timestamp", timestamp); put("width", width); put("height", height)
         put("rotation", rotation); put("text", text); put("source", source); put("notionUrl", notionUrl)
-        put("notebook", notebookId); put("drive", driveIds); put("tags", tags); put("tidyOn", tidyOn); put("order", order); put("mergedFrom", mergedFrom)
+        put("notebook", notebookId); put("drive", driveIds); put("tags", tags); put("tidyOn", tidyOn); put("order", order); put("mergedFrom", mergedFrom); put("chapter", chapter)
         put("tidy", JSONObject().also { o -> for ((k, s) in tidy) o.put(k.toString(), flat(s)) })
         // [[x,y,p,x,y,p,...], ...] keeps the file small
         put("strokes", JSONArray().also { all -> for (s in strokes) all.put(flat(s)) })
@@ -55,7 +56,7 @@ class Note(
             return Note(j.getString("id"), j.getLong("timestamp"), j.getInt("width"), j.getInt("height"),
                 strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""),
                 j.optString("notebook", ""), j.optString("drive", ""), j.optString("tags", ""),
-                tidy ?: emptyMap(), j.optBoolean("tidyOn", true), j.optLong("order", Long.MIN_VALUE), j.optString("mergedFrom", ""))
+                tidy ?: emptyMap(), j.optBoolean("tidyOn", true), j.optLong("order", Long.MIN_VALUE), j.optString("mergedFrom", ""), j.optString("chapter", ""))
         }
     }
 }
@@ -144,6 +145,10 @@ class Prefs(ctx: Context) {
     var apiKey: String get() = sp.getString("apiKey", "") ?: ""; set(v) = sp.edit().putString("apiKey", v.trim()).apply()
     var model: String get() = sp.getString("model", "claude-sonnet-5-5") ?: "claude-sonnet-5-5"; set(v) = sp.edit().putString("model", v.trim()).apply()
     var language: String get() = sp.getString("language", "nl") ?: "nl"; set(v) = sp.edit().putString("language", v.trim()).apply()
+    /** Language of the handwriting for ML Kit; follows the app language until chosen. */
+    var ocrLanguage: String get() = sp.getString("ocrLanguage", null) ?: language; set(v) = sp.edit().putString("ocrLanguage", v.trim()).apply()
+    /** Pages in a notebook: "grid" or "list" (one big page under the other). */
+    var pageView: String get() = sp.getString("pageView", "grid") ?: "grid"; set(v) = sp.edit().putString("pageView", v).apply()
     /** "off", "mlkit" or "claude" */
     var autoOcr: String get() = sp.getString("autoOcr", "mlkit") ?: "mlkit"; set(v) = sp.edit().putString("autoOcr", v).apply()
     var githubToken: String get() = sp.getString("githubToken", "") ?: ""; set(v) = sp.edit().putString("githubToken", v.trim()).apply()
