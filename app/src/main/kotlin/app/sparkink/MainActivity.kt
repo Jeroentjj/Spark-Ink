@@ -119,10 +119,10 @@ class MainActivity : Activity() {
         books = NotebookStore(this)
         pad = Pad(this, prefs, store)
         Lang.en = prefs.language == "en"
-        immersive()
         window.statusBarColor = Ui.BG
         window.navigationBarColor = Ui.BG
         showHome()
+        immersive() // only after setContentView: before it the window has no decor view (crash on Android 11+)
     }
 
     /** Bare screen without any of the app's own UI code, so it cannot crash the same way. */
