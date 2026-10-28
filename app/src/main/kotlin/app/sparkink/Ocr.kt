@@ -97,7 +97,7 @@ object ClaudeOcr {
         "Dit is een handgeschreven notitie (zwarte inkt op wit, afkomstig van een digitale notitieblok). " +
         "Schrijf de tekst exact over, in de taal waarin hij geschreven is. Behoud regeleinden, kopjes en " +
         "opsommingen (gebruik Markdown voor lijstjes en kopjes). Corrigeer niets en verzin niets; wat je " +
-        "echt niet kunt lezen schrijf je als [onleesbaar]. Getekende selectievakjes schrijf je als "- [ ] " (leeg) of "- [x] " (afgevinkt) voor de regel. Een getekende tabel zet je om naar een Markdown-tabel. Eventuele tekeningen beschrijf je kort tussen " +
+        "echt niet kunt lezen schrijf je als [onleesbaar]. Getekende selectievakjes schrijf je als '- [ ] ' (leeg) of '- [x] ' (afgevinkt) voor de regel. Een getekende tabel zet je om naar een Markdown-tabel. Eventuele tekeningen beschrijf je kort tussen " +
         "[haakjes]. Geef alleen de transcriptie, zonder inleiding of uitleg."
 
     fun recognize(png: ByteArray, apiKey: String, model: String): String {
