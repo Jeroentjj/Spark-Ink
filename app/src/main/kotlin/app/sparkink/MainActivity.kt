@@ -106,6 +106,14 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Keep the stack trace of a crash, and show it on the next start instead of crashing again unseen.
+        val crashFile = File(filesDir, "crash.txt")
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { t, e ->
+            try { crashFile.writeText("Spark Ink ${BuildConfig.GIT_SHA}\n" + android.util.Log.getStackTraceString(e)) } catch (_: Exception) {}
+            previous?.uncaughtException(t, e)
+        }
+        if (crashFile.exists()) return showCrash(crashFile)
         prefs = Prefs(this)
         store = NoteStore(this)
         books = NotebookStore(this)
@@ -117,9 +125,38 @@ class MainActivity : Activity() {
         showHome()
     }
 
+    /** Bare screen without any of the app's own UI code, so it cannot crash the same way. */
+    private fun showCrash(f: File) {
+        val trace = f.readText()
+        setContentView(ScrollView(this).apply {
+            setBackgroundColor(Color.BLACK)
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(32, 48, 32, 32)
+                addView(TextView(context).apply {
+                    text = "Spark Ink is de vorige keer gecrasht / crashed last time. Deel dit met de ontwikkelaar / share this with the developer:"
+                    setTextColor(Color.WHITE); textSize = 16f
+                })
+                addView(android.widget.Button(context).apply {
+                    text = "Delen / Share"
+                    setOnClickListener {
+                        startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, trace) }, null))
+                    }
+                })
+                addView(android.widget.Button(context).apply {
+                    text = "Toch openen / Open anyway"
+                    setOnClickListener { f.delete(); recreate() }
+                })
+                addView(TextView(context).apply {
+                    text = trace; setTextColor(Color.LTGRAY); textSize = 11f; typeface = Typeface.MONOSPACE; setTextIsSelectable(true)
+                })
+            })
+        })
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) immersive()
+        if (hasFocus && ::prefs.isInitialized) immersive()
     }
 
     /** Full screen: status and navigation bar hidden, a swipe from the edge shows them for a moment. */

@@ -8,6 +8,7 @@ on:
       - "*.kts"
       - "gradle/**"
       - ".github/workflows/apk.yml"
+      - ".github/smoke.sh"
   workflow_dispatch:
 
 permissions:
@@ -37,6 +38,21 @@ jobs:
         with:
           name: SparkInk-apk
           path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Allow the emulator to use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Start the app on an emulator (no publish when it crashes)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+          script: sh .github/smoke.sh
 
       - name: Publish as the "sparkink-latest" release
         env:
