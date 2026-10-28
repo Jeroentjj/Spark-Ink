@@ -606,6 +606,10 @@ class MainActivity : Activity() {
                 showNote(n)
             },
             Action("ML Kit", R.drawable.ic_scan) { saveEditor(); runOcr(n, "mlkit") { afterOcr() } },
+            // the other language, for the odd page written in English (or Dutch)
+            (if (prefs.language == "en") "nl" else "en").let { other ->
+                Action("ML Kit ${other.uppercase()}", R.drawable.ic_scan) { saveEditor(); runOcr(n, "mlkit", lang = other) { afterOcr() } }
+            },
             Action("Claude", R.drawable.ic_auto) { saveEditor(); runOcr(n, "claude") { afterOcr() } },
             Action("Verplaats", R.drawable.ic_book) { saveEditor(); moveDialog(n) { toast("Verplaatst"); openBook = n.notebookId; showNote(n) } },
             Action("Kopieer", R.drawable.ic_copy) {
@@ -919,7 +923,7 @@ class MainActivity : Activity() {
 
     // ---- OCR -------------------------------------------------------------------------
 
-    private fun runOcr(n: Note, method: String, onFail: () -> Unit = {}, done: () -> Unit) {
+    private fun runOcr(n: Note, method: String, onFail: () -> Unit = {}, lang: String = prefs.language, done: () -> Unit) {
         if (busy) return toast("Even geduld, er loopt nog iets")
         busy = true
         setStatus(if (method == "claude") "Claude leest het handschrift…" else "ML Kit leest het handschrift…")
@@ -936,7 +940,7 @@ class MainActivity : Activity() {
             }
         }
         if (method == "mlkit") {
-            MlKitOcr.recognize(n.sketch(), prefs.language) { finish(it) }
+            MlKitOcr.recognize(n.sketch(), lang) { finish(it) }
         } else {
             bg.execute {
                 val r = try {
@@ -1306,7 +1310,13 @@ class MainActivity : Activity() {
             group.addView(RadioButton(this).apply { id = 100 + i; this.text = text; isChecked = prefs.autoOcr == key })
         }
         ocr.addView(group)
-        val lang = field(ocr, "Taal voor ML Kit (bijv. nl, en, de)", prefs.language)
+        note(ocr, "Taal van je handschrift (ML Kit; Claude herkent de taal zelf)")
+        val langs = listOf("nl" to "Nederlands", "en" to "English")
+        val langGroup = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+        langs.forEachIndexed { i, (code, name) ->
+            langGroup.addView(RadioButton(this).apply { id = 200 + i; text = name; isChecked = prefs.language == code })
+        }
+        ocr.addView(langGroup)
         val sAuto = CheckBox(this).apply { text = "Na synchroniseren vormen strak maken (lijnen, rechthoeken, cirkels, driehoeken)"; isChecked = prefs.autoShapes }
         ocr.addView(sAuto)
         val key = field(ocr, "Claude API-key (blijft alleen op dit toestel)", prefs.apiKey, secret = true)
@@ -1343,7 +1353,7 @@ class MainActivity : Activity() {
 
         saveSettings = {
             prefs.autoOcr = opts[(group.checkedRadioButtonId - 100).coerceIn(0, 2)].first
-            prefs.language = lang.text.toString().ifBlank { "nl" }
+            langs.getOrNull(langGroup.checkedRadioButtonId - 200)?.let { prefs.language = it.first }
             prefs.apiKey = key.text.toString()
             prefs.model = model.text.toString().ifBlank { "claude-sonnet-5-5" }
             prefs.githubToken = ghToken.text.toString()
