@@ -9,31 +9,41 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
-import android.provider.Settings
-import androidx.core.content.FileProvider
-import java.io.File
+import android.content.res.ColorStateList
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
+import android.text.TextWatcher
+import android.transition.TransitionManager
+import android.util.LruCache
+import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
-import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ListView
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import app.sparkink.core.NotionBlocks
+import java.io.File
 import java.text.DateFormat
 import java.util.Date
 import java.util.concurrent.Executors
@@ -41,200 +51,512 @@ import java.util.concurrent.Executors
 class MainActivity : Activity() {
     private lateinit var prefs: Prefs
     private lateinit var store: NoteStore
+    private lateinit var books: NotebookStore
     private lateinit var pad: Pad
 
     private val main = Handler(Looper.getMainLooper())
     private val bg = Executors.newSingleThreadExecutor()
+    private val thumbBg = Executors.newSingleThreadExecutor()
+    private val thumbs = LruCache<String, Bitmap>(48)
+
+    // Navigation: a page ([current]) sits inside a notebook ([openBook], "" = loose pages, null = home).
+    private var current: Note? = null
+    private var openBook: String? = null
+    private var inSettings = false
+    private var showText = false
+    private var sheetOpen = false
+    private var saveSettings: (() -> Unit)? = null
 
     private var status: TextView? = null
     private var statusText = ""
-    private var current: Note? = null
     private var editor: EditText? = null
     private var pendingAfterPermission: (() -> Unit)? = null
     private var busy = false
+
+    private class Action(val label: String, val icon: Int, val run: () -> Unit)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = Prefs(this)
         store = NoteStore(this)
+        books = NotebookStore(this)
         pad = Pad(this, prefs, store)
-        showList()
+        window.statusBarColor = Ui.BG
+        window.navigationBarColor = Ui.BG
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        showHome()
     }
 
     override fun onPause() {
         saveEditor()
+        saveSettings?.invoke()
         super.onPause()
     }
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (current != null) {
-            saveEditor()
-            current = null
-            showList()
-        } else {
-            @Suppress("DEPRECATION")
-            super.onBackPressed()
+        val book = openBook
+        when {
+            current != null -> { saveEditor(); current = null; showBook(book ?: "") }
+            inSettings -> { saveSettings?.invoke(); saveSettings = null; showHome() }
+            book != null -> showHome()
+            else -> {
+                @Suppress("DEPRECATION")
+                super.onBackPressed()
+            }
+        }
+    }
+
+    /** Redraw whatever screen is open, e.g. after a sync or pairing finished. */
+    private fun refresh() {
+        val n = current
+        val book = openBook
+        when {
+            n != null -> showNote(n)
+            inSettings -> { saveSettings?.invoke(); showSettings() }
+            book != null -> showBook(book)
+            else -> showHome()
         }
     }
 
     // ---- small view helpers ------------------------------------------------------------
 
+    private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+    private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
-    private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
-        text = label
-        isAllCaps = false
-        setOnClickListener { onClick() }
-        layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+    private fun rounded(fill: Int, radius: Int, stroke: Int? = null, dashed: Boolean = false) = GradientDrawable().apply {
+        setColor(fill)
+        cornerRadius = dp(radius).toFloat()
+        if (stroke != null) {
+            if (dashed) setStroke(dp(2), stroke, dp(6).toFloat(), dp(4).toFloat()) else setStroke(dp(1), stroke)
+        }
     }
 
-    private fun row(vararg views: View) = LinearLayout(this).apply {
+    private fun label(s: String, size: Float = 15f, color: Int = Ui.INK, bold: Boolean = false) = TextView(this).apply {
+        text = s
+        textSize = size
+        setTextColor(color)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun icon(res: Int, color: Int = Ui.INK, size: Int = 24) = ImageView(this).apply {
+        setImageResource(res)
+        imageTintList = ColorStateList.valueOf(color)
+        layoutParams = LinearLayout.LayoutParams(dp(size), dp(size))
+    }
+
+    private fun ripple(v: View) {
+        val tv = TypedValue()
+        theme.resolveAttribute(android.R.attr.selectableItemBackground, tv, true)
+        v.foreground = getDrawable(tv.resourceId)
+        v.clipToOutline = true
+    }
+
+    private fun rowOf(vararg views: View) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
-        views.forEach { addView(it) }
+        views.forEach { addView(it, LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(4), dp(4), dp(4), dp(4)) }) }
     }
 
-    private fun page(): LinearLayout = LinearLayout(this).apply {
+    /** A rounded, tinted button with an icon, for use inside screens (settings). */
+    private fun pill(text: String, iconRes: Int, color: Int = Ui.ACCENT, onClick: () -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER
+        background = rounded(if (color == Ui.ACCENT) Ui.ACCENT_SOFT else 0xFFF6E3DF.toInt(), 22)
+        setPadding(dp(12), dp(11), dp(12), dp(11))
+        addView(icon(iconRes, color, 18))
+        addView(label(text, 14f, color, bold = true).apply { setPadding(dp(8), 0, 0, 0) })
+        ripple(this)
+        setOnClickListener { onClick() }
+    }
+
+    private fun grid(cells: List<View>, cols: Int = 2) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        setPadding(dp(16), dp(16), dp(16), dp(8))
+        cells.chunked(cols).forEach { chunk ->
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                for (i in 0 until cols) {
+                    addView(chunk.getOrNull(i) ?: View(context),
+                        LinearLayout.LayoutParams(0, WRAP, 1f).apply { setMargins(dp(6), dp(6), dp(6), dp(6)) })
+                }
+            })
+        }
+    }
+
+    private fun header(title: View, back: Boolean, trailing: View? = null) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, 0, 0, dp(8))
+        if (back) {
+            addView(icon(R.drawable.ic_arrow_back).apply {
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                background = rounded(Color.TRANSPARENT, 20)
+                ripple(this)
+                setOnClickListener { onBackPressed() }
+            }, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(4) })
+        }
+        addView(title, LinearLayout.LayoutParams(0, WRAP, 1f))
+        if (trailing != null) addView(trailing)
+    }
+
+    /**
+     * Every screen: header, status line, body, and the action sheet hidden behind a small tab
+     * at the bottom.
+     */
+    private fun scaffold(header: View, body: View, actions: List<Action>) {
+        val root = FrameLayout(this).apply { setBackgroundColor(Ui.BG) }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(16), dp(16), if (actions.isEmpty()) dp(16) else dp(40))
+        }
+        col.addView(header)
+        val st = label(statusText, 13f, Ui.MUTED).apply {
+            setPadding(dp(4), 0, dp(4), dp(8))
+            visibility = if (statusText.isBlank()) View.GONE else View.VISIBLE
+        }
+        status = st
+        col.addView(st)
+        col.addView(body, LinearLayout.LayoutParams(MATCH, 0, 1f))
+        root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
+        if (actions.isNotEmpty()) root.addView(sheet(root, actions), FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+        setContentView(root)
+    }
+
+    private fun sheet(root: ViewGroup, actions: List<Action>): View {
+        val r = dp(22).toFloat()
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
+            elevation = dp(12).toFloat()
+            setPadding(dp(8), dp(10), dp(8), dp(14))
+            visibility = if (sheetOpen) View.VISIBLE else View.GONE
+            actions.chunked(4).forEach { chunk ->
+                addView(LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    for (i in 0 until 4) {
+                        val a = chunk.getOrNull(i)
+                        addView(if (a != null) actionButton(a) else View(context), LinearLayout.LayoutParams(0, WRAP, 1f))
+                    }
+                })
+            }
+        }
+        val chevron = icon(if (sheetOpen) R.drawable.ic_expand_more else R.drawable.ic_expand_less, Ui.MUTED, 22)
+        val tab = FrameLayout(this).apply {
+            background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
+            elevation = dp(12).toFloat()
+            contentDescription = "Knoppen tonen"
+            addView(chevron, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+            setOnClickListener {
+                sheetOpen = !sheetOpen
+                TransitionManager.beginDelayedTransition(root)
+                panel.visibility = if (sheetOpen) View.VISIBLE else View.GONE
+                chevron.setImageResource(if (sheetOpen) R.drawable.ic_expand_more else R.drawable.ic_expand_less)
+            }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            addView(tab, LinearLayout.LayoutParams(dp(72), dp(28)))
+            addView(panel, LinearLayout.LayoutParams(MATCH, WRAP))
+        }
+    }
+
+    private fun actionButton(a: Action) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        setPadding(0, dp(8), 0, dp(8))
+        val danger = a.icon == R.drawable.ic_delete
+        addView(FrameLayout(context).apply {
+            background = rounded(if (danger) 0xFFF6E3DF.toInt() else Ui.ACCENT_SOFT, 24)
+            addView(icon(a.icon, if (danger) Ui.DANGER else Ui.ACCENT, 22), FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
+        }, LinearLayout.LayoutParams(dp(48), dp(48)))
+        addView(label(a.label, 12f, Ui.INK).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+        ripple(this)
+        setOnClickListener { sheetOpen = false; a.run() }
     }
 
     private fun setStatus(s: String) {
         statusText = s
         status?.text = s
+        status?.visibility = if (s.isBlank()) View.GONE else View.VISIBLE
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
-    // ---- list screen -----------------------------------------------------------------
+    private fun pages(n: Int) = if (n == 1) "1 pagina" else "$n pagina's"
 
-    private fun showList() {
-        current = null
-        editor = null
-        val root = page()
-        root.addView(TextView(this).apply { text = "Spark Ink"; textSize = 26f; setTypeface(typeface, Typeface.BOLD) })
+    private fun dateOf(n: Note) = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(n.timestamp * 1000))
 
-        val padLine = if (pad.isPaired) "Gekoppeld: ${prefs.padName ?: "Folio"}" else "Nog geen Folio gekoppeld"
-        root.addView(TextView(this).apply { text = "$padLine  ·  versie ${BuildConfig.GIT_SHA}"; setPadding(0, dp(4), 0, dp(8)) })
-
-        root.addView(row(
-            button("Folio koppelen") { startPairing() },
-            button("Synchroniseer") { startSync() },
-        ))
-        root.addView(row(button("Folio wissen + resetten") {
-            withBlePermissions {
-                setStatus("Houd de knop van de Folio ingedrukt tot hij in de lijst verschijnt en kies hem. WAARSCHUWING: alle pagina's op de Folio worden gewist.")
-                pickDevice(::finishWipe)
-            }
-        }))
-        val statusView = TextView(this).apply { text = statusText; setPadding(0, dp(8), 0, dp(8)) }
-        status = statusView
-        root.addView(statusView)
-
-        val notes = store.all()
-        val list = ListView(this)
-        list.adapter = object : ArrayAdapter<Note>(this, 0, notes) {
-            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-                val n = getItem(position)!!
-                val v = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL; setPadding(0, dp(8), 0, dp(8)) }
-                v.addView(TextView(context).apply {
-                    text = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(n.timestamp * 1000))
-                    setTypeface(typeface, Typeface.BOLD)
-                })
-                v.addView(TextView(context).apply {
-                    text = n.text.lineSequence().firstOrNull { it.isNotBlank() } ?: "(nog geen tekst, ${n.strokes.size} streken)"
-                    maxLines = 2
-                })
-                return v
-            }
+    private fun loadThumb(n: Note, into: ImageView) {
+        val key = "${n.id}_${n.rotation}"
+        thumbs.get(key)?.let { into.setImageBitmap(it); return }
+        into.tag = key
+        thumbBg.execute {
+            val b = Render.bitmap(n.sketch(), 480, cropToInk = false)
+            main.post { thumbs.put(key, b); if (into.tag == key) into.setImageBitmap(b) }
         }
-        list.setOnItemClickListener { _, _, pos, _ -> showNote(notes[pos]) }
-        root.addView(list, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-
-        root.addView(row(
-            button("Instellingen") { showSettings() },
-            button("Update") { checkForUpdate() },
-            button("Log") { showLog() },
-        ))
-        setContentView(root)
     }
 
-    // ---- note screen -----------------------------------------------------------------
+    // ---- home: the notebooks -------------------------------------------------------------
+
+    private fun showHome() {
+        saveEditor()
+        current = null; editor = null; openBook = null; inSettings = false; saveSettings = null
+        val notes = store.all()
+        val padLine = if (pad.isPaired) "Gekoppeld met ${prefs.padName ?: "Folio"}" else "Nog geen Folio gekoppeld (zie Instellingen)"
+        val title = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label("Spark Ink", 28f, Ui.INK, bold = true))
+            addView(label(padLine, 13f, Ui.MUTED))
+        }
+        val cells = ArrayList<View>()
+        cells.add(looseCard(notes.filter { it.notebookId.isEmpty() }))
+        books.all().forEach { b -> cells.add(bookCard(b, notes.count { it.notebookId == b.id })) }
+        cells.add(newBookCard())
+        val body = ScrollView(this).apply { addView(grid(cells)) }
+        scaffold(header(title, back = false), body, listOf(
+            Action("Synchroniseer", R.drawable.ic_sync) { startSync("") },
+            Action("Notitieblok", R.drawable.ic_add) { newBook() },
+            Action("Instellingen", R.drawable.ic_settings) { showSettings() },
+        ))
+    }
+
+    private fun bookCard(b: Notebook, count: Int) = FrameLayout(this).apply {
+        minimumHeight = dp(176)
+        background = rounded(b.color, 14)
+        elevation = dp(3).toFloat()
+        addView(View(context).apply { setBackgroundColor(0x33000000) }, FrameLayout.LayoutParams(dp(10), MATCH, Gravity.START))
+        addView(LinearLayout(context).apply {
+            background = rounded(0xF2FFFFFF.toInt(), 8)
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            addView(label(b.title.ifBlank { "Naamloos" }, 16f, Ui.INK, bold = true).apply { maxLines = 3; ellipsize = TextUtils.TruncateAt.END })
+        }, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP).apply { setMargins(dp(22), dp(18), dp(12), 0) })
+        addView(label(pages(count), 12f, 0xE6FFFFFF.toInt()),
+            FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { setMargins(dp(22), 0, 0, dp(12)) })
+        ripple(this)
+        setOnClickListener { showBook(b.id) }
+        setOnLongClickListener { askName("Notitieblok hernoemen", b.title) { b.title = it; books.save(); showHome() }; true }
+    }
+
+    private fun looseCard(loose: List<Note>) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        minimumHeight = dp(176)
+        background = rounded(Ui.SURFACE, 14, Ui.LINE)
+        elevation = dp(1).toFloat()
+        setPadding(dp(12), dp(12), dp(12), dp(12))
+        addView(label("Losse pagina's", 16f, Ui.INK, bold = true))
+        addView(label(pages(loose.size), 12f, Ui.MUTED))
+        val img = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_START }
+        addView(img, LinearLayout.LayoutParams(MATCH, dp(110)).apply { topMargin = dp(8) })
+        loose.firstOrNull()?.let { loadThumb(it, img) }
+        ripple(this)
+        setOnClickListener { showBook("") }
+    }
+
+    private fun newBookCard() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER
+        minimumHeight = dp(176)
+        background = rounded(Color.TRANSPARENT, 14, Ui.LINE, dashed = true)
+        addView(icon(R.drawable.ic_add, Ui.MUTED, 32))
+        addView(label("Nieuw notitieblok", 14f, Ui.MUTED).apply { setPadding(0, dp(6), 0, 0) })
+        ripple(this)
+        setOnClickListener { newBook() }
+    }
+
+    private fun askName(title: String, initial: String, onOk: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setText(initial); setSingleLine(); hint = "Bijv. Werk, Ideeën, Project X"
+            setSelection(initial.length)
+        }
+        AlertDialog.Builder(this).setTitle(title)
+            .setView(FrameLayout(this).apply { setPadding(dp(20), dp(8), dp(20), 0); addView(input) })
+            .setPositiveButton("Opslaan") { _, _ -> onOk(input.text.toString().trim()) }
+            .setNegativeButton("Annuleren", null).show()
+    }
+
+    private fun newBook() = askName("Nieuw notitieblok", "") { showBook(books.create(it).id) }
+
+    // ---- one notebook (or the loose pages) -------------------------------------------------
+
+    private fun showBook(id: String) {
+        saveEditor()
+        current = null; editor = null; openBook = id; inSettings = false; saveSettings = null
+        val book = books.get(id)
+        val notes = store.all().filter { it.notebookId == (book?.id ?: "") }
+        val titleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            if (book == null) addView(label("Losse pagina's", 24f, Ui.INK, bold = true))
+            else addView(EditText(context).apply {
+                setText(book.title)
+                hint = "Naam van dit notitieblok"
+                textSize = 24f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Ui.INK)
+                background = null
+                setPadding(0, 0, 0, 0)
+                setSingleLine()
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun afterTextChanged(s: Editable?) { book.title = s.toString(); books.save() }
+                })
+            })
+            addView(label(pages(notes.size), 13f, Ui.MUTED))
+        }
+        val body: View = if (notes.isEmpty()) {
+            label(if (book == null) "Geen losse pagina's. Nieuwe pagina's van de Folio komen hier terecht."
+                  else "Nog geen pagina's. Synchroniseer vanuit dit notitieblok, of verplaats pagina's hierheen.", 15f, Ui.MUTED)
+                .apply { gravity = Gravity.CENTER; setPadding(dp(24), dp(48), dp(24), 0) }
+        } else ScrollView(this).apply { addView(grid(notes.map { pageCard(it) })) }
+
+        val actions = arrayListOf(Action("Synchroniseer", R.drawable.ic_sync) { startSync(book?.id ?: "") })
+        if (book != null) {
+            actions.add(Action("Kleur", R.drawable.ic_palette) {
+                book.color = Ui.COVERS[(Ui.COVERS.indexOf(book.color) + 1) % Ui.COVERS.size]
+                books.save()
+                toast("Kaftkleur gewijzigd")
+            })
+            actions.add(Action("Verwijder", R.drawable.ic_delete) {
+                AlertDialog.Builder(this).setMessage("Notitieblok verwijderen? De pagina's blijven bewaard bij de losse pagina's.")
+                    .setPositiveButton("Verwijderen") { _, _ ->
+                        notes.forEach { it.notebookId = ""; store.save(it) }
+                        books.delete(book.id)
+                        showHome()
+                    }
+                    .setNegativeButton("Annuleren", null).show()
+            })
+        }
+        scaffold(header(titleCol, back = true), body, actions)
+    }
+
+    private fun pageCard(n: Note) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(Ui.SURFACE, 12)
+        elevation = dp(2).toFloat()
+        setPadding(dp(8), dp(8), dp(8), dp(10))
+        val img = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+        addView(img, LinearLayout.LayoutParams(MATCH, dp(210)))
+        loadThumb(n, img)
+        addView(label(dateOf(n), 12f, Ui.MUTED).apply { setPadding(dp(2), dp(6), 0, 0) })
+        n.text.lineSequence().firstOrNull { it.isNotBlank() }?.let {
+            addView(label(it, 13f, Ui.INK).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), 0, 0, 0) })
+        }
+        ripple(this)
+        setOnClickListener { showText = false; showNote(n) }
+        setOnLongClickListener { moveDialog(n) { refresh() }; true }
+    }
+
+    private fun moveDialog(n: Note, done: () -> Unit) {
+        val list = books.all()
+        val labels = listOf("Losse pagina's") + list.map { it.title.ifBlank { "Naamloos" } } + "+ Nieuw notitieblok…"
+        AlertDialog.Builder(this).setTitle("Verplaats naar").setItems(labels.toTypedArray()) { _, i ->
+            when {
+                i == 0 -> { n.notebookId = ""; store.save(n); done() }
+                i <= list.size -> { n.notebookId = list[i - 1].id; store.save(n); done() }
+                else -> askName("Nieuw notitieblok", "") { n.notebookId = books.create(it).id; store.save(n); done() }
+            }
+        }.show()
+    }
+
+    // ---- one page ------------------------------------------------------------------------
+
+    private fun segmented(labels: List<String>, selected: Int, onPick: (Int) -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        background = rounded(Ui.ACCENT_SOFT, 18)
+        setPadding(dp(3), dp(3), dp(3), dp(3))
+        labels.forEachIndexed { i, l ->
+            addView(label(l, 13f, if (i == selected) Color.WHITE else Ui.ACCENT, bold = true).apply {
+                setPadding(dp(14), dp(6), dp(14), dp(6))
+                if (i == selected) background = rounded(Ui.ACCENT, 15)
+                setOnClickListener { if (i != selected) onPick(i) }
+            })
+        }
+    }
 
     private fun showNote(n: Note) {
-        current = n
-        val root = page()
-        val scroll = ScrollView(this)
-        val inner = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        scroll.addView(inner)
+        current = n; inSettings = false
+        val sourceLine = when (n.source) {
+            "mlkit" -> "Tekst door ML Kit"
+            "claude" -> "Tekst door Claude"
+            "hand" -> "Tekst handmatig bewerkt"
+            else -> "Nog geen tekst"
+        }
+        val titleCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label(dateOf(n), 17f, Ui.INK, bold = true))
+            addView(label(sourceLine, 12f, Ui.MUTED))
+        }
+        val toggle = segmented(listOf("Pagina", "Tekst"), if (showText) 1 else 0) { i -> saveEditor(); showText = i == 1; showNote(n) }
 
-        val image = ImageView(this).apply { adjustViewBounds = true; setBackgroundColor(0xFFFFFFFF.toInt()) }
-        inner.addView(image, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        fun redraw() {
+        val body: View
+        if (!showText) {
+            editor = null
+            val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
+            body = FrameLayout(this).apply {
+                background = rounded(Ui.SURFACE, 12)
+                elevation = dp(2).toFloat()
+                setPadding(dp(8), dp(8), dp(8), dp(8))
+                addView(image, FrameLayout.LayoutParams(MATCH, MATCH))
+            }
             bg.execute {
                 val bmp = Render.bitmap(n.sketch(), 1400, cropToInk = false)
                 main.post { image.setImageBitmap(bmp) }
             }
-        }
-        redraw()
-
-        val src = TextView(this).apply { setPadding(0, dp(8), 0, 0) }
-        fun srcLabel() {
-            src.text = when (n.source) {
-                "mlkit" -> "Tekst: ML Kit (op het toestel)"
-                "claude" -> "Tekst: Claude"
-                "hand" -> "Tekst: handmatig bewerkt"
-                else -> "Nog geen tekst: kies een herkenning hieronder"
+        } else {
+            val e = EditText(this).apply {
+                setText(n.text)
+                hint = "Nog geen tekst. Kies ML Kit of Claude in de knoppen onderin, of typ zelf."
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                gravity = Gravity.TOP
+                background = null
+                textSize = 17f
+                setTextColor(Ui.INK)
+                setLineSpacing(0f, 1.2f)
+            }
+            editor = e
+            body = ScrollView(this).apply {
+                background = rounded(Ui.SURFACE, 12)
+                elevation = dp(2).toFloat()
+                setPadding(dp(16), dp(12), dp(16), dp(12))
+                isFillViewport = true
+                addView(e)
             }
         }
-        srcLabel()
-        inner.addView(src)
 
-        inner.addView(row(
-            button("Draai ⟳") {
-                n.rotation = (n.rotation + 90) % 360
+        val afterOcr = { if (current?.id == n.id) { showText = true; showNote(n) } }
+        scaffold(header(titleCol, back = true, trailing = toggle), body, listOf(
+            Action("Draai", R.drawable.ic_rotate) {
+                saveEditor()
+                n.rotation = (n.rotation + 180) % 360 // stays portrait
                 prefs.defaultRotation = n.rotation
                 store.save(n)
-                redraw()
+                showNote(n)
             },
-            button("ML Kit") { runOcr(n, "mlkit") { editor?.setText(n.text); srcLabel() } },
-            button("Claude") { runOcr(n, "claude") { editor?.setText(n.text); srcLabel() } },
-        ))
-
-        editor = EditText(this).apply {
-            setText(n.text)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 6
-            gravity = android.view.Gravity.TOP
-        }
-        inner.addView(editor)
-
-        val statusView = TextView(this).apply { text = statusText }
-        status = statusView
-        root.addView(statusView)
-        root.addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        root.addView(row(
-            button("‹ Terug") { onBackPressed() },
-            button("Kopieer") {
+            Action("ML Kit", R.drawable.ic_scan) { saveEditor(); runOcr(n, "mlkit") { afterOcr() } },
+            Action("Claude", R.drawable.ic_auto) { saveEditor(); runOcr(n, "claude") { afterOcr() } },
+            Action("Verplaats", R.drawable.ic_book) { saveEditor(); moveDialog(n) { toast("Verplaatst"); openBook = n.notebookId; showNote(n) } },
+            Action("Kopieer", R.drawable.ic_copy) {
                 saveEditor()
                 (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                     .setPrimaryClip(ClipData.newPlainText("notitie", n.text))
-                toast("Gekopieerd")
+                toast("Tekst gekopieerd")
             },
-            button("Deel") {
+            Action("Deel", R.drawable.ic_share) {
                 saveEditor()
                 startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
                     type = "text/plain"; putExtra(Intent.EXTRA_TEXT, n.text)
                 }, null))
             },
-            button("Notion") { onNotionClicked(n) },
-            button("Wis") {
-                AlertDialog.Builder(this).setMessage("Deze notitie definitief verwijderen?")
-                    .setPositiveButton("Verwijderen") { _, _ -> store.delete(n.id); current = null; showList() }
+            Action("Notion", R.drawable.ic_open_in_new) { onNotionClicked(n) },
+            Action("Wis", R.drawable.ic_delete) {
+                AlertDialog.Builder(this).setMessage("Deze pagina definitief verwijderen?")
+                    .setPositiveButton("Verwijderen") { _, _ -> store.delete(n.id); current = null; editor = null; showBook(n.notebookId) }
                     .setNegativeButton("Annuleren", null).show()
             },
         ))
-        setContentView(root)
     }
 
     private fun saveEditor() {
@@ -258,7 +580,7 @@ class MainActivity : Activity() {
             busy = false
             r.onSuccess {
                 n.text = it; n.source = method; store.save(n)
-                setStatus("Klaar")
+                setStatus("")
                 done()
             }.onFailure {
                 AppLog.add("ocr $method failed: $it")
@@ -281,19 +603,19 @@ class MainActivity : Activity() {
         }
     }
 
-    /** After a sync, recognise every new note with the method chosen in the settings. */
-    private fun autoOcr(notes: List<Note>, index: Int = 0) {
+    /** After a sync, recognise every new note with the method chosen in the settings, then call [finished]. */
+    private fun autoOcr(notes: List<Note>, finished: () -> Unit, index: Int = 0) {
         val method = prefs.autoOcr
-        if (method == "off" || index >= notes.size) { showList(); return }
+        if (method == "off" || index >= notes.size) { finished(); return }
         val n = notes[index]
         val next = {
-            if (prefs.notionAuto && prefs.notionReady && n.text.isNotBlank()) exportToNotion(n) { autoOcr(notes, index + 1) }
-            else autoOcr(notes, index + 1)
+            if (prefs.notionAuto && prefs.notionReady && n.text.isNotBlank()) exportToNotion(n) { autoOcr(notes, finished, index + 1) }
+            else autoOcr(notes, finished, index + 1)
         }
         // Claude needs internet and a key; if it fails fall back to the on-device recogniser, and if that
         // fails too the note simply stays readable as ink.
         runOcr(n, method, onFail = {
-            if (method == "claude") runOcr(n, "mlkit", onFail = { showList() }, done = next) else showList()
+            if (method == "claude") runOcr(n, "mlkit", onFail = finished, done = next) else finished()
         }, done = next)
     }
 
@@ -357,7 +679,7 @@ class MainActivity : Activity() {
         busy = true
         pad.pair(dev, { setStatus(it) }, { setStatus("Druk nu kort op de knop van de Folio om het koppelen te bevestigen.") }) { r ->
             busy = false
-            r.onSuccess { setStatus(it); showList() }.onFailure { setStatus("Koppelen mislukt: ${it.message}") }
+            r.onSuccess { setStatus(it); refresh() }.onFailure { setStatus("Koppelen mislukt: ${it.message}") }
         }
     }
 
@@ -366,21 +688,27 @@ class MainActivity : Activity() {
         busy = true
         pad.wipe(dev, { setStatus(it) }, { setStatus("Druk nu kort op de knop van de Folio. Daarna wist en reset de app hem automatisch.") }) { r ->
             busy = false
-            r.onSuccess { setStatus(it); showList() }.onFailure { setStatus("Wissen mislukt: ${it.message}") }
+            r.onSuccess { setStatus(it); refresh() }.onFailure { setStatus("Wissen mislukt: ${it.message}") }
         }
     }
 
-    private fun startSync() {
-        if (!pad.isPaired) return toast("Koppel eerst je Folio")
+    /** Download new pages into notebook [target] ("" = loose pages) and show them as they arrive. */
+    private fun startSync(target: String) {
+        if (!pad.isPaired) return toast("Koppel eerst je Folio (Instellingen)")
         if (busy) return
         withBlePermissions {
             busy = true
             val fresh = ArrayList<Note>()
-            pad.sync({ setStatus(it) }, { fresh.add(it) }) { r ->
+            pad.sync({ setStatus(it) }, { n ->
+                n.notebookId = target
+                store.save(n)
+                fresh.add(n)
+                if (current == null && !inSettings) showBook(target)
+            }) { r ->
                 busy = false
                 r.onSuccess { n ->
-                    setStatus(if (n == 0) "Geen nieuwe pagina's op de Folio" else "$n pagina('s) opgehaald")
-                    if (n > 0) autoOcr(fresh.reversed()) else showList()
+                    setStatus(if (n == 0) "Geen nieuwe pagina's op de Folio" else "${pages(n)} opgehaald")
+                    if (n > 0) autoOcr(fresh.reversed(), finished = { if (current == null && !inSettings) showBook(target) }) else refresh()
                 }.onFailure { setStatus("Synchroniseren mislukt: ${it.message}") }
             }
         }
@@ -394,7 +722,7 @@ class MainActivity : Activity() {
         if (n.text.isBlank()) return toast("Er is nog geen tekst om te exporteren")
         if (n.notionUrl.isNotBlank()) {
             AlertDialog.Builder(this).setMessage("Deze notitie staat al in Notion.")
-                .setPositiveButton("Openen") { _, _ -> startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(n.notionUrl))) }
+                .setPositiveButton("Openen") { _, _ -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(n.notionUrl))) }
                 .setNeutralButton("Opnieuw exporteren") { _, _ -> exportToNotion(n) {} }
                 .setNegativeButton("Annuleren", null).show()
         } else exportToNotion(n) {}
@@ -403,7 +731,7 @@ class MainActivity : Activity() {
     private fun exportToNotion(n: Note, done: () -> Unit) {
         val id = NotionBlocks.extractId(prefs.notionTarget) ?: return toast("Notion-database/pagina niet herkend")
         setStatus("Naar Notion sturen…")
-        val fallbackTitle = "Notitie " + DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(n.timestamp * 1000))
+        val fallbackTitle = "Notitie " + dateOf(n)
         val text = n.text
         bg.execute {
             val r = try {
@@ -480,44 +808,79 @@ class MainActivity : Activity() {
     // ---- settings & log ----------------------------------------------------------------
 
     private fun showSettings() {
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(8), dp(20), 0) }
-        fun field(label: String, value: String, secret: Boolean = false): EditText {
-            box.addView(TextView(this).apply { text = label; setPadding(0, dp(12), 0, 0) })
+        saveEditor()
+        current = null; editor = null; openBook = null; inSettings = true
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0, 0, 0, dp(24)) }
+        fun section(title: String): LinearLayout {
+            col.addView(label(title.uppercase(), 12f, Ui.MUTED, bold = true).apply { setPadding(dp(4), dp(16), 0, dp(6)) })
+            return LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = rounded(Ui.SURFACE, 14)
+                setPadding(dp(16), dp(10), dp(16), dp(14))
+                col.addView(this)
+            }
+        }
+        fun field(box: LinearLayout, title: String, value: String, secret: Boolean = false): EditText {
+            box.addView(label(title, 13f, Ui.MUTED).apply { setPadding(0, dp(10), 0, 0) })
             return EditText(this).apply {
                 setText(value); setSingleLine()
                 inputType = InputType.TYPE_CLASS_TEXT or (if (secret) InputType.TYPE_TEXT_VARIATION_PASSWORD else 0)
                 box.addView(this)
             }
         }
-        box.addView(TextView(this).apply { text = "Automatisch omzetten naar tekst na synchroniseren" })
+        fun note(box: LinearLayout, s: String) = box.addView(label(s, 13f, Ui.MUTED).apply { setPadding(0, dp(6), 0, dp(4)) })
+
+        val folio = section("Folio")
+        folio.addView(label(if (pad.isPaired) "Gekoppeld met ${prefs.padName ?: "Folio"}" else "Nog geen Folio gekoppeld", 15f, Ui.INK, bold = true))
+        note(folio, "Koppelen: houd de knop 6 seconden ingedrukt tot het lampje blauw knippert. Knippert het blauw-oranje, dan is het geheugen vol: kies dan Wissen + resetten (alle pagina's op de Folio gaan verloren).")
+        folio.addView(rowOf(
+            pill("Koppelen", R.drawable.ic_bluetooth) { startPairing() },
+            pill("Wissen + resetten", R.drawable.ic_delete, Ui.DANGER) {
+                withBlePermissions {
+                    setStatus("Houd de knop van de Folio ingedrukt tot hij in de lijst verschijnt en kies hem. Alle pagina's op de Folio worden gewist.")
+                    pickDevice(::finishWipe)
+                }
+            },
+        ))
+
+        val ocr = section("Tekstherkenning")
+        note(ocr, "Automatisch omzetten naar tekst na synchroniseren")
         val group = RadioGroup(this)
         val opts = listOf("off" to "Uit", "mlkit" to "ML Kit (op het toestel, gratis)", "claude" to "Claude (beter, API-key nodig)")
-        opts.forEachIndexed { i, (key, label) ->
-            group.addView(RadioButton(this).apply { id = 100 + i; text = label; isChecked = prefs.autoOcr == key })
+        opts.forEachIndexed { i, (key, text) ->
+            group.addView(RadioButton(this).apply { id = 100 + i; this.text = text; isChecked = prefs.autoOcr == key })
         }
-        box.addView(group)
-        val lang = field("Taal voor ML Kit (bijv. nl, en, de)", prefs.language)
-        val key = field("Claude API-key (blijft alleen op dit toestel)", prefs.apiKey, secret = true)
-        val model = field("Claude-model", prefs.model)
-        box.addView(TextView(this).apply { text = "App-updates (nodig omdat de repo privé is: maak op github.com/settings/personal-access-tokens een token met alleen lezen-rechten (Contents: Read) voor Jeroentjj/Spark-Ink)"; setPadding(0, dp(20), 0, 0) })
-        val ghToken = field("GitHub-token (alleen voor updates)", prefs.githubToken, secret = true)
-        box.addView(TextView(this).apply { text = "Notion (maak een integratie op notion.so/my-integrations en deel je database of pagina ermee via ••• > Verbindingen)"; setPadding(0, dp(20), 0, 0) })
-        val nToken = field("Notion-token (secret_… of ntn_…)", prefs.notionToken, secret = true)
-        val nTarget = field("Notion database of pagina (link of ID)", prefs.notionTarget)
+        ocr.addView(group)
+        val lang = field(ocr, "Taal voor ML Kit (bijv. nl, en, de)", prefs.language)
+        val key = field(ocr, "Claude API-key (blijft alleen op dit toestel)", prefs.apiKey, secret = true)
+        val model = field(ocr, "Claude-model", prefs.model)
+
+        val notion = section("Notion")
+        note(notion, "Maak een integratie op notion.so/my-integrations en deel je database of pagina ermee via ••• > Verbindingen.")
+        val nToken = field(notion, "Notion-token (secret_… of ntn_…)", prefs.notionToken, secret = true)
+        val nTarget = field(notion, "Notion database of pagina (link of ID)", prefs.notionTarget)
         val nAuto = CheckBox(this).apply { text = "Na tekstherkenning automatisch naar Notion"; isChecked = prefs.notionAuto }
-        box.addView(nAuto)
-        AlertDialog.Builder(this).setTitle("Instellingen").setView(ScrollView(this).apply { addView(box) })
-            .setPositiveButton("Opslaan") { _, _ ->
-                prefs.autoOcr = opts[(group.checkedRadioButtonId - 100).coerceIn(0, 2)].first
-                prefs.language = lang.text.toString().ifBlank { "nl" }
-                prefs.apiKey = key.text.toString()
-                prefs.model = model.text.toString().ifBlank { "claude-sonnet-5-5" }
-                prefs.githubToken = ghToken.text.toString()
-                prefs.notionToken = nToken.text.toString()
-                prefs.notionTarget = nTarget.text.toString()
-                prefs.notionAuto = nAuto.isChecked
-            }
-            .setNegativeButton("Annuleren", null).show()
+        notion.addView(nAuto)
+
+        val app = section("App")
+        note(app, "Versie ${BuildConfig.GIT_SHA}. Updates hebben een GitHub-token met alleen leesrechten (Contents: Read) voor Jeroentjj/Spark-Ink nodig, omdat de repo privé is.")
+        val ghToken = field(app, "GitHub-token (alleen voor updates)", prefs.githubToken, secret = true)
+        app.addView(rowOf(
+            pill("Update zoeken", R.drawable.ic_download) { saveSettings?.invoke(); checkForUpdate() },
+            pill("Log", R.drawable.ic_list) { showLog() },
+        ))
+
+        saveSettings = {
+            prefs.autoOcr = opts[(group.checkedRadioButtonId - 100).coerceIn(0, 2)].first
+            prefs.language = lang.text.toString().ifBlank { "nl" }
+            prefs.apiKey = key.text.toString()
+            prefs.model = model.text.toString().ifBlank { "claude-sonnet-5-5" }
+            prefs.githubToken = ghToken.text.toString()
+            prefs.notionToken = nToken.text.toString()
+            prefs.notionTarget = nTarget.text.toString()
+            prefs.notionAuto = nAuto.isChecked
+        }
+        scaffold(header(label("Instellingen", 24f, Ui.INK, bold = true), back = true), ScrollView(this).apply { addView(col) }, emptyList())
     }
 
     private fun showLog() {

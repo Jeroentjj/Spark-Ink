@@ -18,12 +18,17 @@ class Note(
     var text: String,
     var source: String,           // where [text] came from: "", "mlkit", "claude", "hand"
     var notionUrl: String = "",   // set once exported to Notion
+    var notebookId: String = "",  // "" = loose page, not in a notebook
 ) {
+    // Pages are always shown portrait: the pad reports a landscape page, so turn it a quarter.
+    init { if (rotation % 180 == 0 && width > height) rotation = (rotation + 90) % 360 }
+
     fun sketch() = Sketch(strokes, width, height).rotated(rotation)
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("timestamp", timestamp); put("width", width); put("height", height)
         put("rotation", rotation); put("text", text); put("source", source); put("notionUrl", notionUrl)
+        put("notebook", notebookId)
         // [[x,y,p,x,y,p,...], ...] keeps the file small
         put("strokes", JSONArray().also { all ->
             for (s in strokes) all.put(JSONArray().also { a -> for (p in s) { a.put(p.x); a.put(p.y); a.put(p.p) } })
@@ -38,7 +43,8 @@ class Note(
                 List(a.length() / 3) { k -> Pt(a.getInt(k * 3), a.getInt(k * 3 + 1), a.getInt(k * 3 + 2)) }
             }
             return Note(j.getString("id"), j.getLong("timestamp"), j.getInt("width"), j.getInt("height"),
-                strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""))
+                strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""),
+                j.optString("notebook", ""))
         }
     }
 }
@@ -65,6 +71,43 @@ class NoteStore(ctx: Context) {
 
     fun delete(id: String) {
         File(dir, "$id.json").delete(); File(dir, "$id.raw").delete()
+    }
+}
+
+class Notebook(val id: String, var title: String, var color: Int)
+
+/** The notebooks, kept in one small JSON file; pages point to them by [Note.notebookId]. */
+class NotebookStore(ctx: Context) {
+    private val file = File(ctx.filesDir, "notebooks.json")
+    private val list = ArrayList<Notebook>()
+
+    init {
+        if (file.exists()) try {
+            val a = JSONArray(file.readText())
+            for (i in 0 until a.length()) a.getJSONObject(i).let {
+                list.add(Notebook(it.getString("id"), it.optString("title", ""), it.optInt("color", Ui.COVERS[0])))
+            }
+        } catch (e: Exception) {
+            // Keep the unreadable file instead of overwriting it on the next save.
+            file.renameTo(File(file.path + ".bad"))
+            list.clear()
+        }
+    }
+
+    fun all(): List<Notebook> = list.toList()
+    fun get(id: String) = list.find { it.id == id }
+
+    fun create(title: String) = Notebook("nb${System.currentTimeMillis()}", title, Ui.COVERS[list.size % Ui.COVERS.size])
+        .also { list.add(it); write() }
+
+    fun save() = write()
+
+    fun delete(id: String) { list.removeAll { it.id == id }; write() }
+
+    private fun write() {
+        val a = JSONArray()
+        for (b in list) a.put(JSONObject().put("id", b.id).put("title", b.title).put("color", b.color))
+        File(file.path + ".tmp").also { it.writeText(a.toString()) }.renameTo(file)
     }
 }
 
