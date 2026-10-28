@@ -90,7 +90,8 @@ class MainActivity : Activity() {
     private var inLive = false
     private var inTodos = false
     private var showList = false
-    private var orderPick: ArrayList<String>? = null // page ids tapped in "set order" mode
+    private var orderPick: ArrayList<String>? = null // page ids tapped in "set order" or "merge" mode
+    private var merging = false // what the tapped pages are for: merge them, or put them in order
     private var resumed = false
     private var lastAutoSync = 0L
     private val autoTried = HashSet<String>() // pages already given one automatic text recognition
@@ -209,7 +210,7 @@ class MainActivity : Activity() {
         when {
             inLive -> { pad.stopLive(); inLive = false; if (book != null) showBook(book) else showHome() }
             inTodos && current == null -> { inTodos = false; showHome() }
-            current == null && orderPick != null -> { orderPick = null; setStatus(""); showBook(book ?: "") }
+            current == null && orderPick != null -> { orderPick = null; merging = false; setStatus(""); showBook(book ?: "") }
             current != null -> { saveEditor(); current = null; showBook(book ?: "") }
             inSettings -> { saveSettings?.invoke(); saveSettings = null; showHome() }
             book != null -> showHome()
@@ -561,6 +562,25 @@ class MainActivity : Activity() {
         } else ScrollView(this).apply { addView(grid(notes.map { pageCard(it, inBook = notes) })) }
 
         val pick = orderPick
+        if (pick != null && merging) {
+            setStatus(tr("Tik de pagina's aan die erbij moeten (${pick.size} gekozen). De eerste is de basis, de rest komt erbij in de volgorde waarin je tikt.",
+                "Tap the pages to combine (${pick.size} picked). The first is the base, the others are added in the order you tap them."))
+            return scaffold(header(titleCol, back = true), body, listOf(
+                Action(tr("Voeg samen", "Merge"), R.drawable.ic_merge) {
+                    val byId = notes.associateBy { it.id }
+                    val chosen = pick.mapNotNull { byId[it] }
+                    if (chosen.size < 2) return@Action toast(tr("Kies minstens twee pagina's", "Pick at least two pages"))
+                    // the others live on inside the first; keep their raw pad data
+                    val merged = chosen.drop(1).fold(chosen[0]) { acc, o -> mergeNotes(acc, o) }
+                    store.save(merged)
+                    chosen.drop(1).forEach { store.delete(it.id, keepRaw = true) }
+                    orderPick = null; merging = false
+                    setStatus(tr("${chosen.size} pagina's samengevoegd", "${chosen.size} pages merged"))
+                    showBook(id)
+                },
+                Action(tr("Annuleer", "Cancel"), R.drawable.ic_delete) { orderPick = null; merging = false; setStatus(""); showBook(id) },
+            ))
+        }
         if (pick != null) {
             setStatus(tr("Tik de pagina's aan in de volgorde die je wilt (${pick.size} gekozen), dan Klaar. Niet aangetikte pagina's komen erachter.",
                 "Tap the pages in the order you want (${pick.size} picked), then Done. Pages you don't tap go after them."))
@@ -669,9 +689,13 @@ class MainActivity : Activity() {
         AlertDialog.Builder(this).setItems(arrayOf(
             tr("Verplaats naar ander notitieblok", "Move to another notebook"),
             tr("Volgorde aanpassen", "Change the order"),
+            tr("Samenvoegen met andere pagina's", "Merge with other pages"),
         )) { _, i ->
-            if (i == 0) moveDialog(n) { toast(tr("Verplaatst", "Moved")); showBook(openBook ?: "") }
-            else { orderPick = arrayListOf(); showBook(openBook ?: "") }
+            when (i) {
+                0 -> moveDialog(n) { toast(tr("Verplaatst", "Moved")); showBook(openBook ?: "") }
+                1 -> { merging = false; orderPick = arrayListOf(); showBook(openBook ?: "") }
+                else -> { merging = true; orderPick = arrayListOf(n.id); showBook(openBook ?: "") }
+            }
         }.show()
     }
 
@@ -822,7 +846,6 @@ class MainActivity : Activity() {
                 saveEditor()
                 askName("Tags", n.tags, tr("Bijv. werk, idee, boodschappen", "E.g. work, idea, groceries")) { n.tags = it; store.save(n); showNote(n) }
             },
-            Action(tr("Voeg samen", "Merge"), R.drawable.ic_merge) { saveEditor(); mergeDialog(n) },
             Action(if (prefs.appendTo == n.id) tr("Niet aanvullen", "Don't extend") else tr("Aanvullen", "Extend"), R.drawable.ic_add) {
                 saveEditor()
                 if (prefs.appendTo == n.id) {
@@ -975,21 +998,6 @@ class MainActivity : Activity() {
     private fun mergeNotes(n: Note, o: Note) = Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
         listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
         listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn, n.order)
-
-    /** Append another page of the same notebook to this one; the other page is removed. */
-    private fun mergeDialog(n: Note) {
-        val others = store.all().filter { it.notebookId == n.notebookId && it.id != n.id }
-        if (others.isEmpty()) return toast(tr("Geen andere pagina's in dit notitieblok", "No other pages in this notebook"))
-        val labels = others.map { o -> dateOf(o) + (o.text.lineSequence().firstOrNull { it.isNotBlank() }?.let { " · $it" } ?: "") }
-        AlertDialog.Builder(this).setTitle(tr("Welke pagina toevoegen aan deze?", "Which page should be added to this one?")).setItems(labels.toTypedArray()) { _, i ->
-            val o = others[i]
-            val merged = mergeNotes(n, o)
-            store.save(merged)
-            store.delete(o.id)
-            toast(tr("Pagina's samengevoegd", "Pages merged"))
-            showNote(merged)
-        }.setNegativeButton(tr("Annuleren", "Cancel"), null).show()
-    }
 
     // ---- export --------------------------------------------------------------------------
 
