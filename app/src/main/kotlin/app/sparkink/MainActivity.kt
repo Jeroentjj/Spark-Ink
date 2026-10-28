@@ -47,6 +47,11 @@ import app.sparkink.core.Pt
 import app.sparkink.core.toSvg
 import app.sparkink.core.Docx
 import app.sparkink.core.Todo
+import android.view.DragEvent
+import android.view.MotionEvent
+import android.view.ViewConfiguration
+import android.widget.HorizontalScrollView
+import kotlin.math.abs
 import android.graphics.Paint
 import android.view.inputmethod.EditorInfo
 import android.animation.ValueAnimator
@@ -84,6 +89,7 @@ class MainActivity : Activity() {
     private var inLive = false
     private var inTodos = false
     private var showList = false
+    private var orderPick: ArrayList<String>? = null // page ids tapped in "set order" mode
     private var query = ""
     private var pageInk: InkView? = null
 
@@ -120,6 +126,7 @@ class MainActivity : Activity() {
         when {
             inLive -> { pad.stopLive(); inLive = false; if (book != null) showBook(book) else showHome() }
             inTodos && current == null -> { inTodos = false; showHome() }
+            current == null && orderPick != null -> { orderPick = null; setStatus(""); showBook(book ?: "") }
             current != null -> { saveEditor(); current = null; showBook(book ?: "") }
             inSettings -> { saveSettings?.invoke(); saveSettings = null; showHome() }
             book != null -> showHome()
@@ -248,38 +255,38 @@ class MainActivity : Activity() {
         setContentView(root)
     }
 
+    /** One row of actions at the bottom, behind a small tab; tap the tab or swipe up/down to open or close. */
     private fun sheet(root: ViewGroup, actions: List<Action>): View {
         val r = dp(22).toFloat()
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        val panel = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            isFillViewport = true
             background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
             elevation = dp(12).toFloat()
-            setPadding(dp(8), dp(10), dp(8), dp(14))
+            setPadding(dp(4), dp(8), dp(4), dp(10))
             visibility = if (sheetOpen) View.VISIBLE else View.GONE
-            actions.chunked(4).forEach { chunk ->
-                addView(LinearLayout(context).apply {
-                    orientation = LinearLayout.HORIZONTAL
-                    for (i in 0 until 4) {
-                        val a = chunk.getOrNull(i)
-                        addView(if (a != null) actionButton(a) else View(context), LinearLayout.LayoutParams(0, WRAP, 1f))
-                    }
-                })
-            }
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                actions.forEach { addView(actionButton(it), LinearLayout.LayoutParams(dp(76), WRAP)) }
+            })
         }
         val chevron = icon(if (sheetOpen) R.drawable.ic_expand_more else R.drawable.ic_expand_less, Ui.MUTED, 22)
+        fun setOpen(open: Boolean) {
+            if (open == sheetOpen) return
+            sheetOpen = open
+            TransitionManager.beginDelayedTransition(root)
+            panel.visibility = if (open) View.VISIBLE else View.GONE
+            chevron.setImageResource(if (open) R.drawable.ic_expand_more else R.drawable.ic_expand_less)
+        }
         val tab = FrameLayout(this).apply {
             background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
             elevation = dp(12).toFloat()
             contentDescription = tr("Knoppen tonen", "Show buttons")
             addView(chevron, FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
-            setOnClickListener {
-                sheetOpen = !sheetOpen
-                TransitionManager.beginDelayedTransition(root)
-                panel.visibility = if (sheetOpen) View.VISIBLE else View.GONE
-                chevron.setImageResource(if (sheetOpen) R.drawable.ic_expand_more else R.drawable.ic_expand_less)
-            }
+            setOnClickListener { setOpen(!sheetOpen) }
         }
-        return LinearLayout(this).apply {
+        return SwipeBar(this) { up -> setOpen(up) }.apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
             addView(tab, LinearLayout.LayoutParams(dp(72), dp(28)))
@@ -393,7 +400,9 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { setMargins(dp(22), 0, 0, dp(12)) })
         ripple(this)
         setOnClickListener { showBook(b.id) }
-        setOnLongClickListener { askName(tr("Notitieblok hernoemen", "Rename notebook"), b.title) { b.title = it; books.save(); showHome() }; true }
+        draggable(this, b.id, onDrop = { from, to -> books.move(from, to); showHome() }) {
+            askName(tr("Notitieblok hernoemen", "Rename notebook"), b.title) { b.title = it; books.save(); showHome() }
+        }
     }
 
     private fun looseCard(loose: List<Note>) = LinearLayout(this).apply {
@@ -441,7 +450,7 @@ class MainActivity : Activity() {
         saveEditor()
         current = null; editor = null; openBook = id; inSettings = false; inTodos = false; saveSettings = null
         val book = books.get(id)
-        val notes = store.all().filter { it.notebookId == (book?.id ?: "") }
+        val notes = store.all().filter { it.notebookId == (book?.id ?: "") }.sortedBy { it.sortKey }
         val titleCol = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             if (book == null) addView(label(tr("Losse pagina's", "Loose pages"), 24f, Ui.INK, bold = true))
@@ -466,7 +475,23 @@ class MainActivity : Activity() {
             label(if (book == null) tr("Geen losse pagina's. Nieuwe pagina's van de Folio komen hier terecht.", "No loose pages. New pages from the Folio land here.")
                   else tr("Nog geen pagina's. Synchroniseer vanuit dit notitieblok, of verplaats pagina's hierheen.", "No pages yet. Sync from this notebook, or move pages here."), 15f, Ui.MUTED)
                 .apply { gravity = Gravity.CENTER; setPadding(dp(24), dp(48), dp(24), 0) }
-        } else ScrollView(this).apply { addView(grid(notes.map { pageCard(it) })) }
+        } else ScrollView(this).apply { addView(grid(notes.map { pageCard(it, inBook = notes) })) }
+
+        val pick = orderPick
+        if (pick != null) {
+            setStatus(tr("Tik de pagina's aan in de volgorde die je wilt (${pick.size} gekozen), dan Klaar. Niet aangetikte pagina's komen erachter.",
+                "Tap the pages in the order you want (${pick.size} picked), then Done. Pages you don't tap go after them."))
+            return scaffold(header(titleCol, back = true), body, listOf(
+                Action(tr("Klaar", "Done"), R.drawable.ic_list) {
+                    val byId = notes.associateBy { it.id }
+                    applyOrder(pick.mapNotNull { byId[it] } + notes.filter { it.id !in pick })
+                    orderPick = null
+                    setStatus(tr("Volgorde opgeslagen", "Order saved"))
+                    showBook(id)
+                },
+                Action(tr("Annuleer", "Cancel"), R.drawable.ic_delete) { orderPick = null; setStatus(""); showBook(id) },
+            ))
+        }
 
         val actions = arrayListOf(
             Action(tr("Synchroniseer", "Sync"), R.drawable.ic_sync) { startSync(book?.id ?: "") },
@@ -492,9 +517,13 @@ class MainActivity : Activity() {
         scaffold(header(titleCol, back = true), body, actions)
     }
 
-    private fun pageCard(n: Note) = LinearLayout(this).apply {
+    /** [inBook]: the pages of the open notebook, in order, so this card can be dragged among them. */
+    private fun pageCard(n: Note, inBook: List<Note>? = null) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
-        background = rounded(Ui.SURFACE, 12)
+        val pick = orderPick
+        val picked = pick?.indexOf(n.id) ?: -1
+        background = rounded(Ui.SURFACE, 12, if (picked >= 0) Ui.ACCENT else null)
+        if (picked >= 0) addView(label("${picked + 1}", 16f, Ui.ACCENT, bold = true).apply { setPadding(dp(2), 0, 0, dp(4)) })
         elevation = dp(2).toFloat()
         setPadding(dp(8), dp(8), dp(8), dp(10))
         val img = ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
@@ -506,8 +535,62 @@ class MainActivity : Activity() {
         }
         if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), dp(2), 0, 0) })
         ripple(this)
-        setOnClickListener { openNote(n) }
-        setOnLongClickListener { moveDialog(n) { refresh() }; true }
+        when {
+            pick != null -> setOnClickListener {
+                if (picked >= 0) pick.remove(n.id) else pick.add(n.id)
+                showBook(openBook ?: "")
+            }
+            inBook != null -> {
+                setOnClickListener { openNote(n) }
+                // drag onto another page to move it there; let go in place to tap the order instead
+                draggable(this, n.id, onDrop = { from, to ->
+                    val list = inBook.toMutableList()
+                    val moved = list.first { it.id == from }
+                    list.remove(moved)
+                    list.add(list.indexOfFirst { it.id == to }.let { if (it < 0) list.size else it }, moved)
+                    applyOrder(list)
+                    showBook(openBook ?: "")
+                }) { orderPick = arrayListOf(); showBook(openBook ?: "") }
+            }
+            else -> {
+                setOnClickListener { openNote(n) }
+                setOnLongClickListener { moveDialog(n) { refresh() }; true }
+            }
+        }
+    }
+
+    /** Store [notes] in this order; pages synced later still come first (see [Note.sortKey]). */
+    private fun applyOrder(notes: List<Note>) {
+        if (notes.isEmpty()) return
+        val base = notes.minOf { it.sortKey }
+        notes.forEachIndexed { i, n -> n.order = base + i; store.save(n) }
+    }
+
+    /**
+     * Long press starts dragging [v]; dropping it on another card calls [onDrop] (dragged key, target
+     * key), letting go on itself calls [onSelf].
+     * shortcut: no auto-scroll while dragging, fine for a screenful of cards; add it if lists get long.
+     */
+    private fun draggable(v: View, key: String, onDrop: (String, String) -> Unit, onSelf: () -> Unit) {
+        v.setOnLongClickListener {
+            it.startDragAndDrop(ClipData.newPlainText("spark", key), View.DragShadowBuilder(it), key, 0)
+            true
+        }
+        v.setOnDragListener { view, e ->
+            when (e.action) {
+                DragEvent.ACTION_DRAG_STARTED -> e.localState is String
+                DragEvent.ACTION_DRAG_ENTERED -> { view.alpha = 0.5f; true }
+                DragEvent.ACTION_DRAG_EXITED, DragEvent.ACTION_DRAG_ENDED -> { view.alpha = 1f; true }
+                DragEvent.ACTION_DROP -> {
+                    view.alpha = 1f
+                    val from = e.localState as String
+                    // post: the drag must finish before the screen is rebuilt
+                    main.post { if (from == key) onSelf() else onDrop(from, key) }
+                    true
+                }
+                else -> true
+            }
+        }
     }
 
     private fun moveDialog(n: Note, done: () -> Unit) {
@@ -795,7 +878,7 @@ class MainActivity : Activity() {
     /** [n] with the strokes, text and tags of [o] added; both come from the same sheet, so the ink lines up. */
     private fun mergeNotes(n: Note, o: Note) = Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
         listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
-        listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn)
+        listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn, n.order)
 
     /** Append another page of the same notebook to this one; the other page is removed. */
     private fun mergeDialog(n: Note) {
@@ -1386,4 +1469,27 @@ class MainActivity : Activity() {
             }
             .setNegativeButton(tr("Sluiten", "Close"), null).show()
     }
+}
+
+/** Vertical swipes over the action bar open (up) or close (down) it; taps and sideways scrolling pass through. */
+private class SwipeBar(ctx: Context, private val onSwipe: (up: Boolean) -> Unit) : LinearLayout(ctx) {
+    private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2
+    private var x0 = 0f
+    private var y0 = 0f
+    private var fired = false
+
+    private fun track(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { x0 = e.x; y0 = e.y; fired = false }
+            MotionEvent.ACTION_MOVE -> {
+                val dy = e.y - y0
+                if (!fired && abs(dy) > slop && abs(dy) > abs(e.x - x0)) { fired = true; onSwipe(dy < 0); return true }
+            }
+        }
+        return false
+    }
+
+    override fun onInterceptTouchEvent(e: MotionEvent) = track(e)
+
+    override fun onTouchEvent(e: MotionEvent): Boolean { track(e); return true }
 }
