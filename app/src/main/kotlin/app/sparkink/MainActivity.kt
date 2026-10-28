@@ -83,8 +83,6 @@ class MainActivity : Activity() {
         pad = Pad(this, prefs, store)
         window.statusBarColor = Ui.BG
         window.navigationBarColor = Ui.BG
-        @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         showHome()
     }
 
@@ -164,7 +162,7 @@ class MainActivity : Activity() {
     private fun pill(text: String, iconRes: Int, color: Int = Ui.ACCENT, onClick: () -> Unit) = LinearLayout(this).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
-        background = rounded(if (color == Ui.ACCENT) Ui.ACCENT_SOFT else 0xFFF6E3DF.toInt(), 22)
+        background = rounded(if (color == Ui.ACCENT) Ui.ACCENT_SOFT else Ui.DANGER_SOFT, 22)
         setPadding(dp(12), dp(11), dp(12), dp(11))
         addView(icon(iconRes, color, 18))
         addView(label(text, 14f, color, bold = true).apply { setPadding(dp(8), 0, 0, 0) })
@@ -269,7 +267,7 @@ class MainActivity : Activity() {
         setPadding(0, dp(8), 0, dp(8))
         val danger = a.icon == R.drawable.ic_delete
         addView(FrameLayout(context).apply {
-            background = rounded(if (danger) 0xFFF6E3DF.toInt() else Ui.ACCENT_SOFT, 24)
+            background = rounded(if (danger) Ui.DANGER_SOFT else Ui.ACCENT_SOFT, 24)
             addView(icon(a.icon, if (danger) Ui.DANGER else Ui.ACCENT, 22), FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
         }, LinearLayout.LayoutParams(dp(48), dp(48)))
         addView(label(a.label, 12f, Ui.INK).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
@@ -331,7 +329,7 @@ class MainActivity : Activity() {
         addView(LinearLayout(context).apply {
             background = rounded(0xF2FFFFFF.toInt(), 8)
             setPadding(dp(10), dp(8), dp(10), dp(8))
-            addView(label(b.title.ifBlank { "Naamloos" }, 16f, Ui.INK, bold = true).apply { maxLines = 3; ellipsize = TextUtils.TruncateAt.END })
+            addView(label(b.title.ifBlank { "Naamloos" }, 16f, Ui.PAPER_INK, bold = true).apply { maxLines = 3; ellipsize = TextUtils.TruncateAt.END })
         }, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP).apply { setMargins(dp(22), dp(18), dp(12), 0) })
         addView(label(pages(count), 12f, 0xE6FFFFFF.toInt()),
             FrameLayout.LayoutParams(WRAP, WRAP, Gravity.BOTTOM or Gravity.START).apply { setMargins(dp(22), 0, 0, dp(12)) })
@@ -468,7 +466,7 @@ class MainActivity : Activity() {
         background = rounded(Ui.ACCENT_SOFT, 18)
         setPadding(dp(3), dp(3), dp(3), dp(3))
         labels.forEachIndexed { i, l ->
-            addView(label(l, 13f, if (i == selected) Color.WHITE else Ui.ACCENT, bold = true).apply {
+            addView(label(l, 13f, if (i == selected) Ui.BG else Ui.ACCENT, bold = true).apply {
                 setPadding(dp(14), dp(6), dp(14), dp(6))
                 if (i == selected) background = rounded(Ui.ACCENT, 15)
                 setOnClickListener { if (i != selected) onPick(i) }
