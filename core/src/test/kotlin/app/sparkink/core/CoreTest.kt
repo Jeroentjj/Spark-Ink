@@ -128,6 +128,50 @@ class CoreTest {
     }
 
     @Test
+    fun docxIsAZipWithEscapedText() {
+        val bytes = Docx.build(listOf("28 okt" to "# Kop\n- punt\nA & <b> **vet**", "29 okt" to "tweede"))
+        val entries = HashMap<String, String>()
+        java.util.zip.ZipInputStream(bytes.inputStream()).use { z ->
+            while (true) { val e = z.nextEntry ?: break; entries[e.name] = z.readBytes().toString(Charsets.UTF_8) }
+        }
+        assertEquals(setOf("[Content_Types].xml", "_rels/.rels", "word/document.xml"), entries.keys)
+        val doc = entries.getValue("word/document.xml")
+        assertTrue(doc.contains("A &amp; &lt;b&gt; </w:t>"))
+        assertTrue(doc.contains("<w:b/></w:rPr><w:t xml:space=\"preserve\">vet</w:t>"))
+        assertTrue(doc.contains("•\tpunt"))
+        assertTrue(doc.contains("w:type=\"page\""))
+    }
+
+    @Test
+    fun recognisesTodoListsFromBoxesOrHeading() {
+        val boxed = Todo.normalize("Boodschappen\n☐ melk\n[x] brood\n- kaas\nnoot")
+        assertEquals("Boodschappen\n- [ ] melk\n- [x] brood\n- [ ] kaas\nnoot", boxed)
+        val headed = Todo.normalize("# To do\nbellen\n\nmail sturen")
+        assertEquals("# To do\n- [ ] bellen\n\n- [ ] mail sturen", headed)
+        assertEquals("Gewoon een notitie\nmet tekst", Todo.normalize("Gewoon een notitie\nmet tekst"))
+        assertEquals(listOf("melk", "brood"), Todo.items(boxed).take(2).map { it.text })
+        assertEquals("- [x] a\n- [x] b", Todo.toggle("- [ ] a\n- [x] b", 0))
+        assertEquals("werk, todo", Todo.withTag("werk", boxed))
+        assertEquals("werk, Todo", Todo.withTag("werk, Todo", boxed))
+        assertEquals("- [ ] a\n- [ ] b", Todo.add("- [ ] a", "b"))
+    }
+
+    @Test
+    fun cleansRecognisedShapes() {
+        val square = listOf(Pt(0, 0, 5), Pt(1000, 30, 5), Pt(1020, 990, 5), Pt(10, 1000, 5), Pt(20, 40, 5))
+        assertEquals(listOf(Pt(0, 0, 5), Pt(1020, 0, 5), Pt(1020, 1000, 5), Pt(0, 1000, 5), Pt(0, 0, 5)), Shapes.clean("SHAPE_RECTANGLE", square))
+        val line = listOf(Pt(0, 0, 1), Pt(500, 30, 1), Pt(1000, 0, 1), Pt(1500, 20, 1), Pt(2000, 0, 1))
+        assertEquals(listOf(Pt(0, 0, 1), Pt(2000, 0, 1)), Shapes.clean("line", line))
+        assertEquals(null, Shapes.clean("rectangle", line)) // not closed
+        assertEquals(null, Shapes.clean("ellipse", listOf(Pt(0, 0, 1), Pt(10, 10, 1), Pt(20, 0, 1), Pt(10, 5, 1), Pt(0, 1, 1)))) // too small
+        val circle = (0..20).map { i -> val a = 2 * Math.PI * i / 20; Pt((1000 + 600 * Math.cos(a)).toInt(), (1000 + 600 * Math.sin(a)).toInt(), 3) }
+        assertEquals(49, Shapes.clean("circle", circle)!!.size)
+        assertEquals(null, Shapes.clean("circle", square)) // corners too far from a round shape
+        val word = listOf(Pt(0, 0, 1), Pt(300, 600, 1), Pt(600, 0, 1), Pt(900, 600, 1), Pt(1200, 0, 1))
+        assertEquals(null, Shapes.clean("line", word)) // zigzag writing is not a line
+    }
+
+    @Test
     fun svgHasOnePolylinePerStroke() {
         val svg = Sketch(listOf(listOf(Pt(1, 2, 3), Pt(4, 5, 6)), listOf(Pt(7, 8, 9))), 21000, 14800).toSvg()
         assertTrue(svg.contains("width=\"210.0mm\""))

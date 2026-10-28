@@ -1,7 +1,7 @@
 package app.sparkink.core
 
 /** A Notion block reduced to what we need: its type (paragraph, heading_1, ...) and plain text. */
-data class Block(val type: String, val text: String)
+data class Block(val type: String, val text: String, val checked: Boolean = false)
 
 object NotionBlocks {
     const val MAX_TEXT = 2000     // Notion limit per rich_text item
@@ -13,7 +13,9 @@ object NotionBlocks {
         for (raw in text.lines()) {
             val line = raw.trimEnd()
             if (line.isBlank()) continue
+            val checked = line.startsWith("- [x] ")
             val (type, body) = when {
+                line.startsWith("- [ ] ") || checked -> "to_do" to line.drop(6)
                 line.startsWith("### ") -> "heading_3" to line.drop(4)
                 line.startsWith("## ") -> "heading_2" to line.drop(3)
                 line.startsWith("# ") -> "heading_1" to line.drop(2)
@@ -21,7 +23,7 @@ object NotionBlocks {
                 Regex("^\\d+[.)] ").containsMatchIn(line) -> "numbered_list_item" to line.replace(Regex("^\\d+[.)] "), "")
                 else -> "paragraph" to line
             }
-            body.chunked(MAX_TEXT).forEach { out.add(Block(type, it)) }
+            body.chunked(MAX_TEXT).forEach { out.add(Block(type, it, checked)) }
         }
         if (out.size > MAX_BLOCKS) {
             val keep = out.take(MAX_BLOCKS - 1)

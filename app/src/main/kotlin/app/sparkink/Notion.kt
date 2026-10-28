@@ -65,7 +65,7 @@ object NotionClient {
         val children = JSONArray()
         for (b in blocks) children.put(JSONObject().apply {
             put("object", "block"); put("type", b.type)
-            put(b.type, JSONObject().put("rich_text", richText(b.text)))
+            put(b.type, JSONObject().put("rich_text", richText(b.text)).also { if (b.type == "to_do") it.put("checked", b.checked) })
         })
         val body = JSONObject().put("parent", parent).put("properties", props).put("children", children)
 

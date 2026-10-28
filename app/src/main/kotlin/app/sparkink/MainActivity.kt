@@ -45,6 +45,10 @@ import androidx.core.content.FileProvider
 import app.sparkink.core.NotionBlocks
 import app.sparkink.core.Pt
 import app.sparkink.core.toSvg
+import app.sparkink.core.Docx
+import app.sparkink.core.Todo
+import android.graphics.Paint
+import android.view.inputmethod.EditorInfo
 import android.animation.ValueAnimator
 import android.view.animation.LinearInterpolator
 import java.text.SimpleDateFormat
@@ -56,6 +60,8 @@ import java.io.File
 import java.text.DateFormat
 import java.util.Date
 import java.util.concurrent.Executors
+
+private const val DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 class MainActivity : Activity() {
     private lateinit var prefs: Prefs
@@ -76,6 +82,8 @@ class MainActivity : Activity() {
     private var sheetOpen = false
     private var saveSettings: (() -> Unit)? = null
     private var inLive = false
+    private var inTodos = false
+    private var showList = false
     private var query = ""
     private var pageInk: InkView? = null
 
@@ -110,6 +118,7 @@ class MainActivity : Activity() {
         val book = openBook
         when {
             inLive -> { pad.stopLive(); inLive = false; if (book != null) showBook(book) else showHome() }
+            inTodos && current == null -> { inTodos = false; showHome() }
             current != null -> { saveEditor(); current = null; showBook(book ?: "") }
             inSettings -> { saveSettings?.invoke(); saveSettings = null; showHome() }
             book != null -> showHome()
@@ -126,6 +135,7 @@ class MainActivity : Activity() {
         val book = openBook
         when {
             inLive -> {}
+            inTodos && n == null -> showTodos()
             n != null -> showNote(n)
             inSettings -> { saveSettings?.invoke(); showSettings() }
             book != null -> showBook(book)
@@ -303,7 +313,7 @@ class MainActivity : Activity() {
     private fun dateOf(n: Note) = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(n.timestamp * 1000))
 
     private fun loadThumb(n: Note, into: ImageView) {
-        val key = "${n.id}_${n.rotation}_${n.strokes.size}"
+        val key = "${n.id}_${n.rotation}_${n.strokes.size}_${n.tidyOn && n.tidy.isNotEmpty()}"
         thumbs.get(key)?.let { into.setImageBitmap(it); return }
         into.tag = key
         thumbBg.execute {
@@ -316,7 +326,7 @@ class MainActivity : Activity() {
 
     private fun showHome() {
         saveEditor()
-        current = null; editor = null; openBook = null; inSettings = false; saveSettings = null
+        current = null; editor = null; openBook = null; inSettings = false; inTodos = false; saveSettings = null
         val notes = store.all()
         val battery = if (prefs.padBattery >= 0) " · batterij ${prefs.padBattery}%" else ""
         val padLine = if (pad.isPaired) "Gekoppeld met ${prefs.padName ?: "Folio"}$battery" else "Nog geen Folio gekoppeld (zie Instellingen)"
@@ -332,6 +342,7 @@ class MainActivity : Activity() {
             content.addView(if (q.isEmpty()) {
                 val cells = ArrayList<View>()
                 cells.add(looseCard(notes.filter { it.notebookId.isEmpty() }))
+                todoCard(notes)?.let { cells.add(it) }
                 books.all().forEach { b -> cells.add(bookCard(b, notes.count { it.notebookId == b.id })) }
                 cells.add(newBookCard())
                 grid(cells)
@@ -427,7 +438,7 @@ class MainActivity : Activity() {
 
     private fun showBook(id: String) {
         saveEditor()
-        current = null; editor = null; openBook = id; inSettings = false; saveSettings = null
+        current = null; editor = null; openBook = id; inSettings = false; inTodos = false; saveSettings = null
         val book = books.get(id)
         val notes = store.all().filter { it.notebookId == (book?.id ?: "") }
         val titleCol = LinearLayout(this).apply {
@@ -458,7 +469,7 @@ class MainActivity : Activity() {
 
         val actions = arrayListOf(
             Action("Synchroniseer", R.drawable.ic_sync) { startSync(book?.id ?: "") },
-            Action("PDF", R.drawable.ic_download) { exportBookPdf(book?.title?.ifBlank { null } ?: "Losse pagina's", notes) },
+            Action("Exporteer", R.drawable.ic_download) { exportBook(book?.title?.ifBlank { null } ?: "Losse pagina's", notes) },
         )
         if (book != null) {
             actions.add(Action("Drive", R.drawable.ic_cloud) { uploadToDrive(notes) })
@@ -494,7 +505,7 @@ class MainActivity : Activity() {
         }
         if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT).apply { maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(dp(2), dp(2), 0, 0) })
         ripple(this)
-        setOnClickListener { showText = false; openBook = n.notebookId; showNote(n) }
+        setOnClickListener { openNote(n) }
         setOnLongClickListener { moveDialog(n) { refresh() }; true }
     }
 
@@ -539,10 +550,21 @@ class MainActivity : Activity() {
             addView(label(sourceLine, 12f, Ui.MUTED))
             if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT))
         }
-        val toggle = segmented(listOf("Pagina", "Tekst"), if (showText) 1 else 0) { i -> saveEditor(); showText = i == 1; showNote(n) }
+        val todo = Todo.items(n.text).isNotEmpty()
+        val tabs = if (todo) listOf("Pagina", "Lijst", "Tekst") else listOf("Pagina", "Tekst")
+        val selected = if (!showText) 0 else if (todo && showList) 1 else tabs.size - 1
+        val toggle = segmented(tabs, selected) { i -> saveEditor(); showText = i > 0; showList = todo && i == 1; showNote(n) }
 
         val body: View
-        if (!showText) {
+        if (showText && showList && todo) {
+            editor = null
+            body = ScrollView(this).apply {
+                background = rounded(Ui.SURFACE, 12)
+                elevation = dp(2).toFloat()
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+                addView(checklist(n, withAdd = true))
+            }
+        } else if (!showText) {
             editor = null
             val ink = InkView(this).apply { sketch = n.sketch(); this.ink = prefs.inkColor; widthMm = prefs.inkWidth }
             pageInk = ink
@@ -573,7 +595,7 @@ class MainActivity : Activity() {
             }
         }
 
-        val afterOcr = { if (current?.id == n.id) { showText = true; showNote(n) } }
+        val afterOcr = { if (current?.id == n.id) { showText = true; showList = true; showNote(n) } }
         scaffold(header(titleCol, back = true, trailing = toggle), body, listOf(
             Action("Draai", R.drawable.ic_rotate) {
                 saveEditor()
@@ -600,6 +622,16 @@ class MainActivity : Activity() {
             Action("Notion", R.drawable.ic_open_in_new) { onNotionClicked(n) },
             Action("Drive", R.drawable.ic_cloud) { saveEditor(); uploadToDrive(listOf(n)) },
             Action("Afspelen", R.drawable.ic_play) { replay(n) },
+            Action("Vormen", R.drawable.ic_shapes) {
+                saveEditor()
+                if (n.tidy.isEmpty()) findShapes(n) { if (current?.id == n.id) { showText = false; showNote(n) } }
+                else {
+                    n.tidyOn = !n.tidyOn
+                    store.save(n)
+                    setStatus(if (n.tidyOn) "Vormen strak getekend" else "Vormen zoals getekend")
+                    showText = false; showNote(n)
+                }
+            },
             Action("Exporteer", R.drawable.ic_download) { saveEditor(); exportDialog(n) },
             Action("Tags", R.drawable.ic_label) {
                 saveEditor()
@@ -619,10 +651,113 @@ class MainActivity : Activity() {
         val e = editor ?: return
         val t = e.text.toString()
         if (t != n.text) {
-            n.text = t
+            n.text = Todo.normalize(t)
+            n.tags = Todo.withTag(n.tags, n.text)
             n.source = "hand"
             store.save(n)
         }
+    }
+
+    /** Open a page; a to-do page opens on its checklist. */
+    private fun openNote(n: Note) {
+        inTodos = false
+        openBook = n.notebookId
+        showList = Todo.items(n.text).isNotEmpty()
+        showText = showList
+        showNote(n)
+    }
+
+    /** Tickable list of the tasks in [n]; ticking rewrites "- [ ]" / "- [x]" in its text. */
+    private fun checklist(n: Note, withAdd: Boolean) = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        for (item in Todo.items(n.text)) addView(CheckBox(context).apply {
+            text = item.text
+            textSize = 16f
+            setTextColor(Ui.INK)
+            buttonTintList = ColorStateList.valueOf(Ui.ACCENT)
+            setPadding(dp(4), dp(8), 0, dp(8))
+            isChecked = item.done
+            fun look() {
+                paintFlags = if (isChecked) paintFlags or Paint.STRIKE_THRU_TEXT_FLAG else paintFlags and Paint.STRIKE_THRU_TEXT_FLAG.inv()
+                alpha = if (isChecked) 0.55f else 1f
+            }
+            look()
+            setOnCheckedChangeListener { _, _ -> n.text = Todo.toggle(n.text, item.line); store.save(n); look() }
+        })
+        if (withAdd) addView(EditText(context).apply {
+            hint = "+ Nieuw item"
+            setSingleLine()
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setTextColor(Ui.INK); setHintTextColor(Ui.MUTED)
+            setOnEditorActionListener { v, _, _ ->
+                val t = v.text.toString()
+                if (t.isNotBlank()) {
+                    n.text = Todo.add(n.text, t)
+                    n.tags = Todo.withTag(n.tags, n.text)
+                    store.save(n)
+                    showNote(n)
+                }
+                true
+            }
+        })
+    }
+
+    private fun todoCard(notes: List<Note>): View? {
+        val open = notes.flatMap { n -> Todo.items(n.text).filter { !it.done } }
+        if (open.isEmpty()) return null
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            minimumHeight = dp(176)
+            background = rounded(Ui.ACCENT_SOFT, 14)
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            addView(label("Taken", 16f, Ui.INK, bold = true))
+            addView(label("${open.size} open", 12f, Ui.ACCENT))
+            for (item in open.take(4)) addView(label("☐ " + item.text, 13f, Ui.INK).apply {
+                maxLines = 1; ellipsize = TextUtils.TruncateAt.END; setPadding(0, dp(6), 0, 0)
+            })
+            ripple(this)
+            setOnClickListener { showTodos() }
+        }
+    }
+
+    /** Every page with open tasks, tickable in one place. */
+    private fun showTodos() {
+        saveEditor()
+        current = null; editor = null; openBook = null; inSettings = false; inTodos = true
+        val pagesWithTasks = store.all().filter { n -> Todo.items(n.text).any { !it.done } }
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (n in pagesWithTasks) {
+            val book = books.get(n.notebookId)?.title?.ifBlank { "Naamloos" } ?: "Losse pagina's"
+            col.addView(label("$book · ${dateOf(n)}", 12f, Ui.MUTED, bold = true).apply {
+                setPadding(dp(4), dp(16), 0, dp(4))
+                setOnClickListener { openNote(n) }
+            })
+            col.addView(checklist(n, withAdd = false).apply {
+                background = rounded(Ui.SURFACE, 12)
+                setPadding(dp(12), dp(4), dp(12), dp(4))
+            })
+        }
+        val body = if (pagesWithTasks.isEmpty()) label("Geen open taken. Alles is afgevinkt!", 15f, Ui.MUTED)
+            .apply { gravity = Gravity.CENTER; setPadding(dp(24), dp(48), dp(24), 0) }
+        else ScrollView(this).apply { addView(col) }
+        scaffold(header(label("Taken", 24f, Ui.INK, bold = true), back = true), body, emptyList())
+    }
+
+    private fun findShapes(n: Note, done: () -> Unit) {
+        setStatus("Vormen zoeken…")
+        MlKitShapes.recognize(n.strokes) { r ->
+            r.onSuccess { m ->
+                n.tidy = m; n.tidyOn = true; store.save(n)
+                setStatus(if (m.isEmpty()) "Geen vormen gevonden" else "${m.size} vorm(en) strak getekend. Tik nogmaals op Vormen voor het origineel.")
+            }.onFailure { AppLog.add("shapes failed: $it"); setStatus("Vormen herkennen mislukt: ${it.message}") }
+            done()
+        }
+    }
+
+    /** Find shapes in each page in turn, then [finished] (a failure only skips that page). */
+    private fun shapesAll(notes: List<Note>, index: Int = 0, finished: () -> Unit) {
+        if (index >= notes.size) return finished()
+        findShapes(notes[index]) { shapesAll(notes, index + 1, finished) }
     }
 
     private fun tagLine(n: Note) = n.tags.split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString("  ") { "#$it" }
@@ -649,7 +784,7 @@ class MainActivity : Activity() {
             val o = others[i]
             val merged = Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
                 listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
-                listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "))
+                listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn)
             store.save(merged)
             store.delete(o.id)
             toast("Pagina's samengevoegd")
@@ -687,25 +822,34 @@ class MainActivity : Activity() {
         val ink = prefs.inkColor
         val width = prefs.inkWidth
         AlertDialog.Builder(this).setTitle("Exporteer pagina")
-            .setItems(arrayOf("PDF (vector)", "SVG (vector)", "PNG (afbeelding)", "Tekst (.txt)")) { _, i ->
+            .setItems(arrayOf("PDF (vector)", "SVG (vector)", "PNG (afbeelding)", "Tekst (.txt)", "Word (.docx)")) { _, i ->
                 exportAndShare {
                     when (i) {
                         0 -> exportFile("$base.pdf").also { Render.pdf(listOf(n.sketch()), ink, width, it) } to "application/pdf"
                         1 -> exportFile("$base.svg").also { it.writeText(n.sketch().toSvg("#%06x".format(ink and 0xffffff), width.toDouble())) } to "image/svg+xml"
                         2 -> exportFile("$base.png").also { it.writeBytes(Render.png(Render.bitmap(n.sketch(), 2400, false, ink, width))) } to "image/png"
-                        else -> exportFile("$base.txt").also { it.writeText(n.text) } to "text/plain"
+                        3 -> exportFile("$base.txt").also { it.writeText(n.text) } to "text/plain"
+                        else -> exportFile("$base.docx").also { it.writeBytes(Docx.build(listOf(dateOf(n) to n.text))) } to DOCX
                     }
                 }
             }.show()
     }
 
-    private fun exportBookPdf(title: String, notes: List<Note>) {
+    /** A whole notebook, oldest page first. */
+    private fun exportBook(title: String, notes: List<Note>) {
         if (notes.isEmpty()) return toast("Geen pagina's om te exporteren")
         val name = title.filter { it.isLetterOrDigit() || it in " -_.'" }.ifBlank { "Spark Ink" }
-        val sketches = notes.sortedBy { it.timestamp }.map { it.sketch() }
+        val sorted = notes.sortedBy { it.timestamp }
         val ink = prefs.inkColor
         val width = prefs.inkWidth
-        exportAndShare { exportFile("$name.pdf").also { Render.pdf(sketches, ink, width, it) } to "application/pdf" }
+        AlertDialog.Builder(this).setTitle("Exporteer notitieblok")
+            .setItems(arrayOf("PDF (de pagina's)", "Word (de tekst)")) { _, i ->
+                if (i == 0) exportAndShare { exportFile("$name.pdf").also { Render.pdf(sorted.map { it.sketch() }, ink, width, it) } to "application/pdf" }
+                else {
+                    val sections = sorted.map { dateOf(it) to it.text.ifBlank { "(nog geen tekst)" } }
+                    exportAndShare { exportFile("$name.docx").also { it.writeBytes(Docx.build(sections)) } to DOCX }
+                }
+            }.show()
     }
 
     // ---- live ----------------------------------------------------------------------------
@@ -767,7 +911,7 @@ class MainActivity : Activity() {
         fun finish(r: Result<String>) {
             busy = false
             r.onSuccess {
-                n.text = it; n.source = method; store.save(n)
+                n.text = Todo.normalize(it); n.tags = Todo.withTag(n.tags, n.text); n.source = method; store.save(n)
                 setStatus("")
                 done()
             }.onFailure {
@@ -903,8 +1047,10 @@ class MainActivity : Activity() {
                 r.onSuccess { n ->
                     setStatus(if (n == 0) "Geen nieuwe pagina's op de Folio" else "${pages(n)} opgehaald")
                     if (n > 0) autoOcr(fresh.reversed(), finished = {
-                        if (current == null && !inSettings) showBook(target)
-                        if (prefs.driveAuto) uploadToDrive(fresh)
+                        shapesAll(if (prefs.autoShapes) fresh else emptyList()) {
+                            if (current == null && !inSettings) showBook(target)
+                            if (prefs.driveAuto) uploadToDrive(fresh)
+                        }
                     }) else refresh()
                 }.onFailure { setStatus("Synchroniseren mislukt: ${it.message}") }
             }
@@ -1132,6 +1278,8 @@ class MainActivity : Activity() {
         }
         ocr.addView(group)
         val lang = field(ocr, "Taal voor ML Kit (bijv. nl, en, de)", prefs.language)
+        val sAuto = CheckBox(this).apply { text = "Na synchroniseren vormen strak maken (lijnen, rechthoeken, cirkels, driehoeken)"; isChecked = prefs.autoShapes }
+        ocr.addView(sAuto)
         val key = field(ocr, "Claude API-key (blijft alleen op dit toestel)", prefs.apiKey, secret = true)
         val model = field(ocr, "Claude-model", prefs.model)
 
@@ -1174,6 +1322,7 @@ class MainActivity : Activity() {
             prefs.notionTarget = nTarget.text.toString()
             prefs.notionAuto = nAuto.isChecked
             prefs.driveAuto = dAuto.isChecked
+            prefs.autoShapes = sAuto.isChecked
         }
         scaffold(header(label("Instellingen", 24f, Ui.INK, bold = true), back = true), ScrollView(this).apply { addView(col) }, emptyList())
     }

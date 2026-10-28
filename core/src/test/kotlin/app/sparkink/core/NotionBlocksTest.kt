@@ -16,6 +16,12 @@ class NotionBlocksTest {
     }
 
     @Test
+    fun tasksBecomeTodoBlocks() {
+        assertEquals(listOf(Block("to_do", "melk"), Block("to_do", "brood", true)),
+            NotionBlocks.fromMarkdown("- [ ] melk\n- [x] brood"))
+    }
+
+    @Test
     fun respectsNotionLimits() {
         assertEquals(2, NotionBlocks.fromMarkdown("x".repeat(3000)).size)
         val many = NotionBlocks.fromMarkdown((1..250).joinToString("\n") { "regel $it" })

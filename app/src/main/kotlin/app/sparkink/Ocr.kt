@@ -1,6 +1,8 @@
 package app.sparkink
 
 import android.util.Base64
+import app.sparkink.core.Pt
+import app.sparkink.core.Shapes
 import app.sparkink.core.Sketch
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.common.model.RemoteModelManager
@@ -51,13 +53,51 @@ object MlKitOcr {
     }
 }
 
+/** Drawn lines, rectangles, circles and triangles, with ML Kit's shape model (offline after one download). */
+object MlKitShapes {
+    /** Returns stroke index -> clean shape for every stroke that is a recognised shape. */
+    fun recognize(strokes: List<List<Pt>>, done: (Result<Map<Int, List<Pt>>>) -> Unit) {
+        val model = try {
+            val id = DigitalInkRecognitionModelIdentifier.fromLanguageTag("zxx-Zsym-x-shapes")
+                ?: return done(Result.failure(Exception("ML Kit heeft geen vormenmodel")))
+            DigitalInkRecognitionModel.builder(id).build()
+        } catch (e: Exception) {
+            return done(Result.failure(e))
+        }
+        val todo = strokes.indices.filter { Shapes.isCandidate(strokes[it]) }
+        if (todo.isEmpty()) return done(Result.success(emptyMap()))
+        RemoteModelManager.getInstance().download(model, DownloadConditions.Builder().build())
+            .addOnFailureListener { done(Result.failure(Exception("Vormenmodel downloaden mislukt (internet nodig, eenmalig): ${it.message}"))) }
+            .addOnSuccessListener {
+                val rec = DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(model).build())
+                val out = HashMap<Int, List<Pt>>()
+                fun finish(r: Result<Map<Int, List<Pt>>>) { rec.close(); done(r) }
+                fun next(k: Int) {
+                    if (k >= todo.size) return finish(Result.success(out))
+                    val i = todo[k]
+                    val sb = Ink.Stroke.builder()
+                    for (p in strokes[i]) sb.addPoint(Ink.Point.create(p.x / 25f, p.y / 25f))
+                    rec.recognize(Ink.builder().addStroke(sb.build()).build())
+                        .addOnSuccessListener { r ->
+                            val label = r.candidates.firstOrNull()?.text ?: ""
+                            AppLog.add("shape stroke $i: $label")
+                            Shapes.clean(label, strokes[i])?.let { out[i] = it }
+                            next(k + 1)
+                        }
+                        .addOnFailureListener { finish(Result.failure(it)) }
+                }
+                next(0)
+            }
+    }
+}
+
 /** Handwriting to text with Claude's vision. Blocking: call from a worker thread. */
 object ClaudeOcr {
     private const val PROMPT =
         "Dit is een handgeschreven notitie (zwarte inkt op wit, afkomstig van een digitale notitieblok). " +
         "Schrijf de tekst exact over, in de taal waarin hij geschreven is. Behoud regeleinden, kopjes en " +
         "opsommingen (gebruik Markdown voor lijstjes en kopjes). Corrigeer niets en verzin niets; wat je " +
-        "echt niet kunt lezen schrijf je als [onleesbaar]. Eventuele tekeningen beschrijf je kort tussen " +
+        "echt niet kunt lezen schrijf je als [onleesbaar]. Getekende selectievakjes schrijf je als "- [ ] " (leeg) of "- [x] " (afgevinkt) voor de regel. Een getekende tabel zet je om naar een Markdown-tabel. Eventuele tekeningen beschrijf je kort tussen " +
         "[haakjes]. Geef alleen de transcriptie, zonder inleiding of uitleg."
 
     fun recognize(png: ByteArray, apiKey: String, model: String): String {

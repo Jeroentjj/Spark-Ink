@@ -21,32 +21,36 @@ class Note(
     var notebookId: String = "",  // "" = loose page, not in a notebook
     var driveIds: String = "",    // "folder png txt" ids in Google Drive, once uploaded
     var tags: String = "",        // comma separated, typed by the user
+    var tidy: Map<Int, List<Pt>> = emptyMap(), // stroke index -> clean shape (see Shapes)
+    var tidyOn: Boolean = true,   // show the clean shapes instead of the drawn ones
 ) {
     // Pages are always shown portrait: the pad reports a landscape page, so turn it a quarter.
     init { if (rotation % 180 == 0 && width > height) rotation = (rotation + 90) % 360 }
 
-    fun sketch() = Sketch(strokes, width, height).rotated(rotation)
+    fun sketch() = Sketch(if (tidyOn && tidy.isNotEmpty()) strokes.mapIndexed { i, s -> tidy[i] ?: s } else strokes, width, height)
+        .rotated(rotation)
 
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("timestamp", timestamp); put("width", width); put("height", height)
         put("rotation", rotation); put("text", text); put("source", source); put("notionUrl", notionUrl)
-        put("notebook", notebookId); put("drive", driveIds); put("tags", tags)
+        put("notebook", notebookId); put("drive", driveIds); put("tags", tags); put("tidyOn", tidyOn)
+        put("tidy", JSONObject().also { o -> for ((k, s) in tidy) o.put(k.toString(), flat(s)) })
         // [[x,y,p,x,y,p,...], ...] keeps the file small
-        put("strokes", JSONArray().also { all ->
-            for (s in strokes) all.put(JSONArray().also { a -> for (p in s) { a.put(p.x); a.put(p.y); a.put(p.p) } })
-        })
+        put("strokes", JSONArray().also { all -> for (s in strokes) all.put(flat(s)) })
     }
 
     companion object {
+        private fun flat(s: List<Pt>) = JSONArray().also { a -> for (p in s) { a.put(p.x); a.put(p.y); a.put(p.p) } }
+        private fun points(a: JSONArray) = List(a.length() / 3) { k -> Pt(a.getInt(k * 3), a.getInt(k * 3 + 1), a.getInt(k * 3 + 2)) }
+
         fun fromJson(j: JSONObject): Note {
             val arr = j.getJSONArray("strokes")
-            val strokes = List(arr.length()) { i ->
-                val a = arr.getJSONArray(i)
-                List(a.length() / 3) { k -> Pt(a.getInt(k * 3), a.getInt(k * 3 + 1), a.getInt(k * 3 + 2)) }
-            }
+            val strokes = List(arr.length()) { i -> points(arr.getJSONArray(i)) }
+            val tidy = j.optJSONObject("tidy")?.let { o -> o.keys().asSequence().associate { k -> k.toInt() to points(o.getJSONArray(k)) } }
             return Note(j.getString("id"), j.getLong("timestamp"), j.getInt("width"), j.getInt("height"),
                 strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""),
-                j.optString("notebook", ""), j.optString("drive", ""), j.optString("tags", ""))
+                j.optString("notebook", ""), j.optString("drive", ""), j.optString("tags", ""),
+                tidy ?: emptyMap(), j.optBoolean("tidyOn", true))
         }
     }
 }
@@ -135,6 +139,7 @@ class Prefs(ctx: Context) {
 
     var inkColor: Int get() = sp.getInt("inkColor", 0xFF000000.toInt()); set(v) = sp.edit().putInt("inkColor", v).apply()
     var inkWidth: Float get() = sp.getFloat("inkWidth", 0.35f); set(v) = sp.edit().putFloat("inkWidth", v).apply()
+    var autoShapes: Boolean get() = sp.getBoolean("autoShapes", true); set(v) = sp.edit().putBoolean("autoShapes", v).apply()
     var padBattery: Int get() = sp.getInt("padBattery", -1); set(v) = sp.edit().putInt("padBattery", v).apply()
 
     var defaultRotation: Int get() = sp.getInt("defaultRotation", 0); set(v) = sp.edit().putInt("defaultRotation", v).apply()
