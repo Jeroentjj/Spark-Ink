@@ -75,8 +75,9 @@ class NoteStore(ctx: Context) {
             .mapNotNull { load(it.name.removeSuffix(".json")) }
             .sortedByDescending { it.timestamp }
 
-    fun delete(id: String) {
-        File(dir, "$id.json").delete(); File(dir, "$id.raw").delete()
+    /** [keepRaw]: the page lives on inside another one, so keep the pad's original bytes. */
+    fun delete(id: String, keepRaw: Boolean = false) {
+        File(dir, "$id.json").delete(); if (!keepRaw) File(dir, "$id.raw").delete()
     }
 }
 
@@ -140,6 +141,8 @@ class Prefs(ctx: Context) {
     var inkColor: Int get() = sp.getInt("inkColor", 0xFF000000.toInt()); set(v) = sp.edit().putInt("inkColor", v).apply()
     var inkWidth: Float get() = sp.getFloat("inkWidth", 0.35f); set(v) = sp.edit().putFloat("inkWidth", v).apply()
     var autoShapes: Boolean get() = sp.getBoolean("autoShapes", true); set(v) = sp.edit().putBoolean("autoShapes", v).apply()
+    /** Id of the page that the next synced page is added to ("Aanvullen"), or null. */
+    var appendTo: String? get() = sp.getString("appendTo", null); set(v) = sp.edit().putString("appendTo", v).apply()
     var padBattery: Int get() = sp.getInt("padBattery", -1); set(v) = sp.edit().putInt("padBattery", v).apply()
 
     var defaultRotation: Int get() = sp.getInt("defaultRotation", 0); set(v) = sp.edit().putInt("defaultRotation", v).apply()

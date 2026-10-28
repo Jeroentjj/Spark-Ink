@@ -549,6 +549,7 @@ class MainActivity : Activity() {
             addView(label(dateOf(n), 17f, Ui.INK, bold = true))
             addView(label(sourceLine, 12f, Ui.MUTED))
             if (n.tags.isNotBlank()) addView(label(tagLine(n), 12f, Ui.ACCENT))
+            if (prefs.appendTo == n.id) addView(label("Wordt aangevuld bij de volgende sync", 12f, Ui.ACCENT, bold = true))
         }
         val todo = Todo.items(n.text).isNotEmpty()
         val tabs = if (todo) listOf("Pagina", "Lijst", "Tekst") else listOf("Pagina", "Tekst")
@@ -638,6 +639,17 @@ class MainActivity : Activity() {
                 askName("Tags", n.tags, "Bijv. werk, idee, boodschappen") { n.tags = it; store.save(n); showNote(n) }
             },
             Action("Voeg samen", R.drawable.ic_merge) { saveEditor(); mergeDialog(n) },
+            Action(if (prefs.appendTo == n.id) "Niet aanvullen" else "Aanvullen", R.drawable.ic_add) {
+                saveEditor()
+                if (prefs.appendTo == n.id) {
+                    prefs.appendTo = null
+                    setStatus("Volgende sync wordt weer een nieuwe pagina")
+                } else {
+                    prefs.appendTo = n.id
+                    setStatus("Schrijf verder op dit vel en synchroniseer: wat je toevoegt komt in deze pagina.")
+                }
+                showNote(n)
+            },
             Action("Wis", R.drawable.ic_delete) {
                 AlertDialog.Builder(this).setMessage("Deze pagina definitief verwijderen?")
                     .setPositiveButton("Verwijderen") { _, _ -> store.delete(n.id); current = null; editor = null; showBook(n.notebookId) }
@@ -775,6 +787,11 @@ class MainActivity : Activity() {
         }
     }
 
+    /** [n] with the strokes, text and tags of [o] added; both come from the same sheet, so the ink lines up. */
+    private fun mergeNotes(n: Note, o: Note) = Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
+        listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
+        listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn)
+
     /** Append another page of the same notebook to this one; the other page is removed. */
     private fun mergeDialog(n: Note) {
         val others = store.all().filter { it.notebookId == n.notebookId && it.id != n.id }
@@ -782,9 +799,7 @@ class MainActivity : Activity() {
         val labels = others.map { o -> dateOf(o) + (o.text.lineSequence().firstOrNull { it.isNotBlank() }?.let { " · $it" } ?: "") }
         AlertDialog.Builder(this).setTitle("Welke pagina toevoegen aan deze?").setItems(labels.toTypedArray()) { _, i ->
             val o = others[i]
-            val merged = Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
-                listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
-                listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn)
+            val merged = mergeNotes(n, o)
             store.save(merged)
             store.delete(o.id)
             toast("Pagina's samengevoegd")
@@ -1037,16 +1052,30 @@ class MainActivity : Activity() {
         withBlePermissions {
             busy = true
             val fresh = ArrayList<Note>()
+            var appended: Note? = null
             pad.sync({ setStatus(it) }, { n ->
-                n.notebookId = target
-                store.save(n)
-                fresh.add(n)
+                // "Aanvullen": the first page that comes in is what was added to that sheet
+                val into = prefs.appendTo?.let { store.load(it) }
+                if (prefs.appendTo != null) prefs.appendTo = null
+                if (into != null) {
+                    val merged = mergeNotes(into, n.also { it.text = "" })
+                    store.save(merged)
+                    store.delete(n.id, keepRaw = true)
+                    appended = merged
+                    fresh.add(merged)
+                } else {
+                    n.notebookId = target
+                    store.save(n)
+                    fresh.add(n)
+                }
                 if (current == null && !inSettings) showBook(target)
             }) { r ->
                 busy = false
                 r.onSuccess { n ->
-                    setStatus(if (n == 0) "Geen nieuwe pagina's op de Folio" else "${pages(n)} opgehaald")
-                    if (n > 0) autoOcr(fresh.reversed(), finished = {
+                    val extra = appended?.let { " (aangevuld: ${dateOf(it)})" } ?: ""
+                    setStatus(if (n == 0) "Geen nieuwe pagina's op de Folio" else "${pages(n)} opgehaald$extra")
+                    // a page whose text was typed by hand keeps that text
+                    if (n > 0) autoOcr(fresh.filter { it.source != "hand" }.reversed(), finished = {
                         shapesAll(if (prefs.autoShapes) fresh else emptyList()) {
                             if (current == null && !inSettings) showBook(target)
                             if (prefs.driveAuto) uploadToDrive(fresh)
