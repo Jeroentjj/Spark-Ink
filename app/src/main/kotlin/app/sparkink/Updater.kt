@@ -29,8 +29,8 @@ object Updater {
             val code = c.responseCode
             val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.readText() ?: ""
             if (code == 404 || code == 401 || code == 403)
-                throw Exception("GitHub geeft geen toegang (fout $code). De repo is privé: vul bij Instellingen een GitHub-token met leesrechten in.")
-            if (code !in 200..299) throw Exception("GitHub fout $code")
+                throw Exception(tr("GitHub geeft geen toegang (fout $code). De repo is privé: vul bij Instellingen een GitHub-token met leesrechten in.", "GitHub refused access (error $code). The repo is private: enter a read-only GitHub token in Settings."))
+            if (code !in 200..299) throw Exception(tr("GitHub fout $code", "GitHub error $code"))
             val json = JSONObject(text)
             val assets = json.getJSONArray("assets")
             for (i in 0 until assets.length()) {
@@ -38,7 +38,7 @@ object Updater {
                 if (a.getString("name").endsWith(".apk"))
                     return Release(json.optString("target_commitish").take(7), a.getString("url"), a.getLong("size"))
             }
-            throw Exception("Geen APK gevonden op de release (wordt misschien net vernieuwd, probeer over een minuut opnieuw)")
+            throw Exception(tr("Geen APK gevonden op de release (wordt misschien net vernieuwd, probeer over een minuut opnieuw)", "No APK found on the release (it may be updating right now, try again in a minute)"))
         } finally {
             c.disconnect()
         }
@@ -55,12 +55,12 @@ object Updater {
             var code = c.responseCode
             if (code in 301..303 || code == 307 || code == 308) {
                 // The file itself lives on a signed storage URL that must not receive our token.
-                val next = c.getHeaderField("Location") ?: throw Exception("Download-omleiding zonder adres")
+                val next = c.getHeaderField("Location") ?: throw Exception(tr("Download-omleiding zonder adres", "Download redirect without an address"))
                 c.disconnect()
                 c = open(next, "", "application/octet-stream")
                 code = c.responseCode
             }
-            if (code !in 200..299) throw Exception("Download mislukt (fout $code)")
+            if (code !in 200..299) throw Exception(tr("Download mislukt (fout $code)", "Download failed (error $code)"))
             var total = 0L
             c.inputStream.use { input ->
                 dest.outputStream().use { out ->
@@ -77,7 +77,7 @@ object Updater {
             val head = dest.inputStream().use { ByteArray(2).also { b -> it.read(b) } }
             if (total != r.size || head[0] != 'P'.code.toByte() || head[1] != 'K'.code.toByte()) {
                 dest.delete()
-                throw Exception("Gedownload bestand is onvolledig of geen APK ($total van ${r.size} bytes)")
+                throw Exception(tr("Gedownload bestand is onvolledig of geen APK ($total van ${r.size} bytes)", "Downloaded file is incomplete or not an APK ($total of ${r.size} bytes)"))
             }
         } finally {
             c.disconnect()

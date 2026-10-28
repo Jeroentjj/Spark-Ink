@@ -19,7 +19,7 @@ object DriveClient {
     private const val UPLOAD = "https://www.googleapis.com/upload/drive/v3/files"
     private const val FOLDER = "application/vnd.google-apps.folder"
 
-    private class HttpError(val code: Int, msg: String) : Exception("Drive fout $code: $msg")
+    private class HttpError(val code: Int, msg: String) : Exception(tr("Drive fout $code: $msg", "Drive error $code: $msg"))
 
     private fun call(method: String, url: String, token: String, contentType: String? = null, body: ByteArray? = null): JSONObject {
         val conn = URL(url).openConnection() as HttpURLConnection

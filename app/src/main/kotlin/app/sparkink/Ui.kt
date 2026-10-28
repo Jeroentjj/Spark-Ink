@@ -1,5 +1,13 @@
 package app.sparkink
 
+/** Language of the interface; follows the language chosen in the settings. */
+object Lang {
+    @Volatile var en = false
+}
+
+/** The Dutch or the English text, whichever the interface is in. */
+fun tr(nl: String, en: String) = if (Lang.en) en else nl
+
 /** Colours of the app: dark night-desk, light ink, one soft blue accent, and muted notebook covers. */
 object Ui {
     val BG = 0xFF16171B.toInt()

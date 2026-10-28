@@ -21,7 +21,7 @@ object MlKitOcr {
     fun recognize(sketch: Sketch, languageTag: String, done: (Result<String>) -> Unit) {
         val model = try {
             val id = DigitalInkRecognitionModelIdentifier.fromLanguageTag(languageTag)
-                ?: return done(Result.failure(Exception("ML Kit kent taal '$languageTag' niet")))
+                ?: return done(Result.failure(Exception(tr("ML Kit kent taal '$languageTag' niet", "ML Kit does not know language '$languageTag'"))))
             DigitalInkRecognitionModel.builder(id).build()
         } catch (e: Exception) {
             return done(Result.failure(e))
@@ -30,7 +30,7 @@ object MlKitOcr {
         if (lines.isEmpty()) return done(Result.success(""))
 
         RemoteModelManager.getInstance().download(model, DownloadConditions.Builder().build())
-            .addOnFailureListener { done(Result.failure(Exception("Taalmodel downloaden mislukt (internet nodig, eenmalig): ${it.message}"))) }
+            .addOnFailureListener { done(Result.failure(Exception(tr("Taalmodel downloaden mislukt (internet nodig, eenmalig): ${it.message}", "Downloading the language model failed (needs internet, once): ${it.message}")))) }
             .addOnSuccessListener {
                 val rec = DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(model).build())
                 val out = ArrayList<String>()
@@ -59,7 +59,7 @@ object MlKitShapes {
     fun recognize(strokes: List<List<Pt>>, done: (Result<Map<Int, List<Pt>>>) -> Unit) {
         val model = try {
             val id = DigitalInkRecognitionModelIdentifier.fromLanguageTag("zxx-Zsym-x-shapes")
-                ?: return done(Result.failure(Exception("ML Kit heeft geen vormenmodel")))
+                ?: return done(Result.failure(Exception(tr("ML Kit heeft geen vormenmodel", "ML Kit has no shape model"))))
             DigitalInkRecognitionModel.builder(id).build()
         } catch (e: Exception) {
             return done(Result.failure(e))
@@ -67,7 +67,7 @@ object MlKitShapes {
         val todo = strokes.indices.filter { Shapes.isCandidate(strokes[it]) }
         if (todo.isEmpty()) return done(Result.success(emptyMap()))
         RemoteModelManager.getInstance().download(model, DownloadConditions.Builder().build())
-            .addOnFailureListener { done(Result.failure(Exception("Vormenmodel downloaden mislukt (internet nodig, eenmalig): ${it.message}"))) }
+            .addOnFailureListener { done(Result.failure(Exception(tr("Vormenmodel downloaden mislukt (internet nodig, eenmalig): ${it.message}", "Downloading the shape model failed (needs internet, once): ${it.message}")))) }
             .addOnSuccessListener {
                 val rec = DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(model).build())
                 val out = HashMap<Int, List<Pt>>()
@@ -101,7 +101,7 @@ object ClaudeOcr {
         "[haakjes]. Geef alleen de transcriptie, zonder inleiding of uitleg."
 
     fun recognize(png: ByteArray, apiKey: String, model: String): String {
-        if (apiKey.isBlank()) throw Exception("Geen Claude API-key ingesteld (Instellingen)")
+        if (apiKey.isBlank()) throw Exception(tr("Geen Claude API-key ingesteld (Instellingen)", "No Claude API key set (Settings)"))
         val body = JSONObject().apply {
             put("model", model)
             put("max_tokens", 4096)
@@ -133,7 +133,7 @@ object ClaudeOcr {
             val text = (if (code in 200..299) conn.inputStream else conn.errorStream)?.bufferedReader()?.readText() ?: ""
             if (code !in 200..299) {
                 val msg = try { JSONObject(text).getJSONObject("error").getString("message") } catch (_: Exception) { text.take(200) }
-                throw Exception("Claude API fout $code: $msg")
+                throw Exception(tr("Claude API fout $code: $msg", "Claude API error $code: $msg"))
             }
             val content = JSONObject(text).getJSONArray("content")
             return buildString {

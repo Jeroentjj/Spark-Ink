@@ -22,8 +22,11 @@ import java.security.SecureRandom
 import java.util.concurrent.Executors
 
 // LED meanings from Wacom support ("What do the LEDs on Bamboo Spark mean?").
-private const val LED_HINT = "Lampje: blauw knipperend = koppelmodus, oranje knipperend = batterij bijna leeg, " +
-    "afwisselend blauw-oranje = geheugen vol (gebruik dan Folio wissen + resetten)."
+private val LED_HINT get() = tr(
+    "Lampje: blauw knipperend = koppelmodus, oranje knipperend = batterij bijna leeg, " +
+        "afwisselend blauw-oranje = geheugen vol (gebruik dan Folio wissen + resetten).",
+    "Light: blinking blue = pairing mode, blinking orange = battery low, " +
+        "blue and orange in turn = memory full (then use Erase + reset).")
 
 /** In-memory debug log, shown and shareable from the app: it is the way to debug against the real pad. */
 object AppLog {
@@ -101,7 +104,7 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
         worker.execute {
             var t: BleTransport? = null
             try {
-                ui { status("Koppelen met ${device.name}… bevestig een Bluetooth-koppelverzoek op je telefoon als dat verschijnt") }
+                ui { status(tr("Koppelen met ${device.name}… bevestig een Bluetooth-koppelverzoek op je telefoon als dat verschijnt", "Pairing with ${device.name}… confirm the Bluetooth pairing request on your phone if it appears")) }
                 t = BleTransport(ctx, device) { AppLog.add(it) }
                 val kind = t.open()
                 AppLog.add("pad family: $kind")
@@ -111,10 +114,10 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                 prefs.padUuid = uuid.joinToString("") { "%02x".format(it) }
                 prefs.padKind = kind.name
                 prefs.padName = device.name
-                ui { done(Result.success("Gekoppeld met ${device.name} (batterij ${info.batteryPercent}%)")) }
+                ui { done(Result.success(tr("Gekoppeld met ${device.name} (batterij ${info.batteryPercent}%)", "Paired with ${device.name} (battery ${info.batteryPercent}%)"))) }
             } catch (e: Exception) {
                 AppLog.add("pair failed: $e")
-                ui { done(Result.failure(Exception("${explain(e)} $LED_HINT Druk na het koppelverzoek binnen 5 seconden op de knop."))) }
+                ui { done(Result.failure(Exception(tr("${explain(e)} $LED_HINT Druk na het koppelverzoek binnen 5 seconden op de knop.", "${explain(e)} $LED_HINT After the pairing request, press the button within 5 seconds.")))) }
             } finally {
                 t?.close()
             }
@@ -129,11 +132,11 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
         worker.execute {
             var t: BleTransport? = null
             try {
-                ui { status("Verbinden met ${device.name} om te wissen…") }
+                ui { status(tr("Verbinden met ${device.name} om te wissen…", "Connecting to ${device.name} to erase it…")) }
                 t = BleTransport(ctx, device) { AppLog.add(it) }
                 val kind = t.open()
                 AppLog.add("pad family: $kind")
-                ui { status("Wissen en resetten…") }
+                ui { status(tr("Wissen en resetten…", "Erasing and resetting…")) }
                 val results = WacomSession(t, kind) { AppLog.add(it) }
                     .wipe(ByteArray(6).also { SecureRandom().nextBytes(it) }) { ui(pressButton) }
                 results.forEach { AppLog.add("wipe: $it") }
@@ -141,8 +144,8 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                 prefs.padUuid = null
                 val ok = results.any { it.endsWith(": ok") }
                 ui {
-                    if (ok) done(Result.success("Folio gewist. Houd nu de knop 6 seconden ingedrukt tot het lampje blauw knippert en tik op Folio koppelen."))
-                    else done(Result.failure(Exception("de Folio weigerde beide commando's. Zie de log.")))
+                    if (ok) done(Result.success(tr("Folio gewist. Houd nu de knop 6 seconden ingedrukt tot het lampje blauw knippert en tik op Folio koppelen.", "Folio erased. Now hold the button for 6 seconds until the light blinks blue, and tap Pair.")))
+                    else done(Result.failure(Exception(tr("de Folio weigerde beide commando's. Zie de log.", "the Folio refused both commands. See the log."))))
                 }
             } catch (e: Exception) {
                 AppLog.add("wipe failed: $e")
@@ -158,17 +161,17 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
     fun sync(status: (String) -> Unit, onNote: (Note) -> Unit, done: (Result<Int>) -> Unit) {
         val address = prefs.padAddress
         val uuid = prefs.padUuid
-        if (adapter == null || address == null || uuid == null) return done(Result.failure(Exception("Nog geen Folio gekoppeld")))
+        if (adapter == null || address == null || uuid == null) return done(Result.failure(Exception(tr("Nog geen Folio gekoppeld", "No Folio paired yet"))))
         worker.execute {
             var t: BleTransport? = null
             try {
-                ui { status("Zoeken naar de Folio… druk nu kort op de knop van de Folio") }
+                ui { status(tr("Zoeken naar de Folio… druk nu kort op de knop van de Folio", "Looking for the Folio… briefly press the Folio button now")) }
                 val seen = scanFor(address, 40_000)
                 if (seen == null) AppLog.add("Folio niet in scan gezien, probeer toch direct te verbinden")
-                ui { status("Verbinden…") }
+                ui { status(tr("Verbinden…", "Connecting…")) }
                 t = BleTransport(ctx, seen?.device ?: adapter.getRemoteDevice(address)) { AppLog.add(it) }
                 val kind = t.open()
-                ui { status("Notities ophalen…") }
+                ui { status(tr("Notities ophalen…", "Fetching notes…")) }
                 val session = WacomSession(t, kind) { AppLog.add(it) }
                 val n = session.syncAll(hexToBytes(uuid)) { page ->
                     val parsed = StrokeParser.parse(page.raw)
@@ -201,13 +204,13 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
     private fun <T> withPad(status: (String) -> Unit, block: (BleTransport, WacomSession, ByteArray) -> T, done: (Result<T>) -> Unit) {
         val address = prefs.padAddress
         val uuid = prefs.padUuid
-        if (adapter == null || address == null || uuid == null) return done(Result.failure(Exception("Nog geen Folio gekoppeld")))
+        if (adapter == null || address == null || uuid == null) return done(Result.failure(Exception(tr("Nog geen Folio gekoppeld", "No Folio paired yet"))))
         worker.execute {
             var t: BleTransport? = null
             try {
-                ui { status("Zoeken naar de Folio… druk nu kort op de knop van de Folio") }
+                ui { status(tr("Zoeken naar de Folio… druk nu kort op de knop van de Folio", "Looking for the Folio… briefly press the Folio button now")) }
                 val seen = scanFor(address, 40_000)
-                ui { status("Verbinden…") }
+                ui { status(tr("Verbinden…", "Connecting…")) }
                 t = BleTransport(ctx, seen?.device ?: adapter.getRemoteDevice(address)) { AppLog.add(it) }
                 val kind = t.open()
                 val r = block(t, WacomSession(t, kind) { AppLog.add(it) }, hexToBytes(uuid))
@@ -240,21 +243,21 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                 if (pts.isNotEmpty()) ui { onPoints(pts) } else if (logged++ < 20) AppLog.add("live ${d.hex()}")
             }
             s.startLive(uuid)
-            ui { status("Live: schrijf op de Folio, het verschijnt hier.") }
+            ui { status(tr("Live: schrijf op de Folio, het verschijnt hier.", "Live: write on the Folio and it appears here.")) }
             while (!liveStop.get() && t.isOpen) Thread.sleep(200)
             t.onLive = null
             if (t.isOpen) try { s.stopLive() } catch (e: Exception) { AppLog.add("stop live: $e") }
-            if (!liveStop.get()) throw Exception("De Folio verbrak de verbinding")
+            if (!liveStop.get()) throw Exception(tr("De Folio verbrak de verbinding", "The Folio dropped the connection"))
         }, done)
     }
 
     fun stopLive() = liveStop.set(true)
 
     private fun explain(e: Exception): String = when (e) {
-        is AuthorizationError -> "De Folio herkent deze app niet meer. Koppel opnieuw (knop 6 sec ingedrukt houden)."
+        is AuthorizationError -> tr("De Folio herkent deze app niet meer. Koppel opnieuw (knop 6 sec ingedrukt houden).", "The Folio no longer knows this app. Pair again (hold the button for 6 s).")
         is DeviceError -> if (e.invalidState)
-            "De Folio is niet klaar om te synchroniseren. $LED_HINT"
-        else "De Folio gaf foutcode ${e.code}. Zie de log."
+            tr("De Folio is niet klaar om te synchroniseren. $LED_HINT", "The Folio is not ready to sync. $LED_HINT")
+        else tr("De Folio gaf foutcode ${e.code}. Zie de log.", "The Folio returned error code ${e.code}. See the log.")
         else -> e.message ?: e.toString()
     }
 }

@@ -153,11 +153,11 @@ class BleTransport(
 
         if (!connected.tryAcquire(if (autoConnect) 45L else 35L, TimeUnit.SECONDS) || disconnected)
             throw WacomException(
-                if (connectStatus == -1) "Geen reactie van de Folio (time-out): hij accepteert nu geen verbinding"
-                else "Geen verbinding met de Folio (Bluetooth-status $connectStatus)")
+                if (connectStatus == -1) tr("Geen reactie van de Folio (time-out): hij accepteert nu geen verbinding", "No answer from the Folio (time-out): it is not accepting a connection right now")
+                else tr("Geen verbinding met de Folio (Bluetooth-status $connectStatus)", "No connection to the Folio (Bluetooth status $connectStatus)"))
         if (!g.discoverServices()) throw WacomException("Service discovery failed to start")
         if (!discovered.tryAcquire(20, TimeUnit.SECONDS) || disconnected)
-            throw WacomException("De Folio verbrak de verbinding tijdens het opzoeken van services")
+            throw WacomException(tr("De Folio verbrak de verbinding tijdens het opzoeken van services", "The Folio dropped the connection while looking up its services"))
 
         val all = g.services.flatMap { s -> s.characteristics.map { it.uuid } }
         log("characteristics: " + all.joinToString(" ") { it.toString().substring(0, 8) })
@@ -172,7 +172,7 @@ class BleTransport(
     }
 
     /** Only for live mode, so the proven sync path does not touch this characteristic. */
-    fun enableLive() = enableNotify(find(Gatt.LIVE_PEN) ?: throw WacomException("Deze Folio heeft geen live-modus"))
+    fun enableLive() = enableNotify(find(Gatt.LIVE_PEN) ?: throw WacomException(tr("Deze Folio heeft geen live-modus", "This Folio has no live mode")))
 
     private fun find(id: UUID): BluetoothGattCharacteristic? {
         for (s in gatt!!.services) s.getCharacteristic(id)?.let { return it }
@@ -213,7 +213,7 @@ class BleTransport(
             while (device.bondState != BluetoothDevice.BOND_BONDED && System.currentTimeMillis() < deadline && !disconnected)
                 Thread.sleep(500)
             if (device.bondState != BluetoothDevice.BOND_BONDED)
-                throw WacomException("Bluetooth-koppeling met de telefoon niet bevestigd")
+                throw WacomException(tr("Bluetooth-koppeling met de telefoon niet bevestigd", "Bluetooth pairing with the phone was not confirmed"))
         }
         throw WacomException("Enabling notifications kept failing")
     }

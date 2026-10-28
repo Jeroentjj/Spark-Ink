@@ -10,7 +10,7 @@ object Todo {
     // A hand-drawn box as OCR reads it: [ ] [x] ☐ □ ☑ ☒ ✓ ✔, optionally after a bullet.
     private val box = Regex("""^\s*(?:[-*•]\s*)?(\[\s?([xX✓✔]?)\s?]|[☐□]|[☑☒✓✔])\s*""")
     private val bullet = Regex("""^\s*[-*•]\s+""")
-    private val heading = Regex("""\b(to[ -]?do'?s?|te doen|taken|boodschappen|checklist)\b""", RegexOption.IGNORE_CASE)
+    private val heading = Regex("""\b(to[ -]?do'?s?|te doen|taken|boodschappen|checklist|tasks|shopping|groceries)\b""", RegexOption.IGNORE_CASE)
     private val task = Regex("""^- \[( |x)] (.*)$""")
 
     class Item(val line: Int, val text: String, val done: Boolean)

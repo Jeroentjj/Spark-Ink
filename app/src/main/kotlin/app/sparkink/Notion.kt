@@ -37,7 +37,7 @@ object NotionClient {
 
     private fun error(code: Int, text: String): Exception {
         val msg = try { JSONObject(text).getString("message") } catch (_: Exception) { text.take(200) }
-        return Exception("Notion fout $code: $msg")
+        return Exception(tr("Notion fout $code: $msg", "Notion error $code: $msg"))
     }
 
     /**
@@ -45,7 +45,7 @@ object NotionClient {
      * (a sub-page is added). Returns the URL of the new page.
      */
     fun createPage(token: String, targetId: String, title: String, blocks: List<Block>): String {
-        if (token.isBlank()) throw Exception("Geen Notion-token ingesteld (Instellingen)")
+        if (token.isBlank()) throw Exception(tr("Geen Notion-token ingesteld (Instellingen)", "No Notion token set (Settings)"))
 
         val (dbCode, dbText) = call("GET", "databases/$targetId", token)
         if (dbCode == 401) throw error(dbCode, dbText)
