@@ -24,6 +24,7 @@ class Note(
     var tidy: Map<Int, List<Pt>> = emptyMap(), // stroke index -> clean shape (see Shapes)
     var tidyOn: Boolean = true,   // show the clean shapes instead of the drawn ones
     var order: Long = Long.MIN_VALUE, // place in its notebook once the user reordered it
+    var mergedFrom: String = "",  // JSON array of the original pages when this page is a merge (undo)
 ) {
     /** Position in the notebook: newest first until the user drags pages around. */
     val sortKey get() = if (order == Long.MIN_VALUE) -timestamp else order
@@ -37,7 +38,7 @@ class Note(
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("timestamp", timestamp); put("width", width); put("height", height)
         put("rotation", rotation); put("text", text); put("source", source); put("notionUrl", notionUrl)
-        put("notebook", notebookId); put("drive", driveIds); put("tags", tags); put("tidyOn", tidyOn); put("order", order)
+        put("notebook", notebookId); put("drive", driveIds); put("tags", tags); put("tidyOn", tidyOn); put("order", order); put("mergedFrom", mergedFrom)
         put("tidy", JSONObject().also { o -> for ((k, s) in tidy) o.put(k.toString(), flat(s)) })
         // [[x,y,p,x,y,p,...], ...] keeps the file small
         put("strokes", JSONArray().also { all -> for (s in strokes) all.put(flat(s)) })
@@ -54,7 +55,7 @@ class Note(
             return Note(j.getString("id"), j.getLong("timestamp"), j.getInt("width"), j.getInt("height"),
                 strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""),
                 j.optString("notebook", ""), j.optString("drive", ""), j.optString("tags", ""),
-                tidy ?: emptyMap(), j.optBoolean("tidyOn", true), j.optLong("order", Long.MIN_VALUE))
+                tidy ?: emptyMap(), j.optBoolean("tidyOn", true), j.optLong("order", Long.MIN_VALUE), j.optString("mergedFrom", ""))
         }
     }
 }

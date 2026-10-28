@@ -7,6 +7,9 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.pdf.PdfDocument
+import android.view.GestureDetector
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import app.sparkink.core.Sketch
 import java.io.ByteArrayOutputStream
@@ -83,8 +86,59 @@ object Render {
     }
 }
 
-/** A page drawn straight from its strokes: sharp at any size, and able to replay the writing. */
+/**
+ * A page drawn straight from its strokes: sharp at any size, and able to replay the writing.
+ * Pinch to zoom, drag to move around, double tap to zoom in or back out.
+ */
 class InkView(ctx: Context) : View(ctx) {
+    private var zoom = 1f
+    private var panX = 0f
+    private var panY = 0f
+
+    private fun clampPan() {
+        // keep the page on screen: at zoom z the content may move (z - 1) * size
+        panX = panX.coerceIn(-(zoom - 1) * width, 0f)
+        panY = panY.coerceIn(-(zoom - 1) * height, 0f)
+    }
+
+    private val scaler = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScale(d: ScaleGestureDetector): Boolean {
+            val z = (zoom * d.scaleFactor).coerceIn(1f, 6f)
+            // zoom around the fingers
+            panX = d.focusX - (d.focusX - panX) * z / zoom
+            panY = d.focusY - (d.focusY - panY) * z / zoom
+            zoom = z
+            clampPan()
+            invalidate()
+            return true
+        }
+    })
+
+    private val gestures = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onDown(e: MotionEvent) = true
+        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+            if (zoom <= 1f) return false
+            panX -= dx; panY -= dy
+            clampPan()
+            invalidate()
+            return true
+        }
+        override fun onDoubleTap(e: MotionEvent): Boolean {
+            if (zoom > 1f) { zoom = 1f; panX = 0f; panY = 0f }
+            else { zoom = 2.5f; panX = e.x - e.x * zoom; panY = e.y - e.y * zoom; clampPan() }
+            invalidate()
+            return true
+        }
+    })
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        scaler.onTouchEvent(e)
+        gestures.onTouchEvent(e)
+        // while zoomed in, the screen around us must not take the drag away
+        if (zoom > 1f) parent?.requestDisallowInterceptTouchEvent(true)
+        return true
+    }
+
     var sketch: Sketch? = null
         set(v) { field = v; invalidate() }
     var limit = Int.MAX_VALUE
@@ -101,11 +155,13 @@ class InkView(ctx: Context) : View(ctx) {
         val scale = min(width.toFloat() / sk.width, height.toFloat() / sk.height)
         val ox = (width - sk.width * scale) / 2
         val oy = (height - sk.height * scale) / 2
-        c.drawRect(ox, oy, ox + sk.width * scale, oy + sk.height * scale, paper)
         paint.color = ink
         paint.strokeWidth = max(1.5f, widthMm * 100 * scale)
         c.save()
+        c.translate(panX, panY)
+        c.scale(zoom, zoom)
         c.translate(ox, oy)
+        c.drawRect(0f, 0f, sk.width * scale, sk.height * scale, paper)
         Render.draw(c, sk, scale, 0, 0, paint, limit)
         c.restore()
     }

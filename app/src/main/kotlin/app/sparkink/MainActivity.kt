@@ -47,6 +47,7 @@ import app.sparkink.core.Pt
 import app.sparkink.core.toSvg
 import app.sparkink.core.Docx
 import app.sparkink.core.Todo
+import org.json.JSONArray
 import android.view.DragEvent
 import android.view.MotionEvent
 import android.view.ViewConfiguration
@@ -342,13 +343,13 @@ class MainActivity : Activity() {
     /** One row of actions at the bottom, behind a small tab; tap the tab or swipe up/down to open or close. */
     private fun sheet(root: ViewGroup, actions: List<Action>): View {
         val r = dp(22).toFloat()
-        // at most two rows that fit the width: never scrolls
-        val cols = if (actions.size <= 5) actions.size else (actions.size + 1) / 2
+        // always one row that fits the width: never scrolls, never covers the page
+        val cols = actions.size
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply { setColor(Ui.SURFACE); cornerRadii = floatArrayOf(r, r, r, r, 0f, 0f, 0f, 0f) }
             elevation = dp(12).toFloat()
-            setPadding(dp(4), dp(8), dp(4), dp(10))
+            setPadding(dp(2), dp(6), dp(2), dp(8))
             visibility = if (sheetOpen) View.VISIBLE else View.GONE
             actions.chunked(cols).forEach { chunk ->
                 addView(LinearLayout(context).apply {
@@ -386,13 +387,16 @@ class MainActivity : Activity() {
     private fun actionButton(a: Action) = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         gravity = Gravity.CENTER_HORIZONTAL
-        setPadding(0, dp(8), 0, dp(8))
+        setPadding(0, dp(4), 0, dp(4))
         val danger = a.icon == R.drawable.ic_delete
         addView(FrameLayout(context).apply {
-            background = rounded(if (danger) Ui.DANGER_SOFT else Ui.ACCENT_SOFT, 24)
-            addView(icon(a.icon, if (danger) Ui.DANGER else Ui.ACCENT, 22), FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER))
-        }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        addView(label(a.label, 12f, Ui.INK).apply { gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0) })
+            background = rounded(if (danger) Ui.DANGER_SOFT else Ui.ACCENT_SOFT, 20)
+            addView(icon(a.icon, if (danger) Ui.DANGER else Ui.ACCENT, 20), FrameLayout.LayoutParams(dp(20), dp(20), Gravity.CENTER))
+        }, LinearLayout.LayoutParams(dp(40), dp(40)))
+        addView(label(a.label, 11f, Ui.INK).apply {
+            gravity = Gravity.CENTER; setPadding(dp(1), dp(4), dp(1), 0)
+            maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        }, LinearLayout.LayoutParams(MATCH, WRAP))
         ripple(this)
         setOnClickListener { sheetOpen = false; a.run() }
     }
@@ -690,8 +694,9 @@ class MainActivity : Activity() {
             tr("Verplaats naar ander notitieblok", "Move to another notebook"),
             tr("Volgorde aanpassen", "Change the order"),
             tr("Samenvoegen met andere pagina's", "Merge with other pages"),
-        )) { _, i ->
+        ) + (if (n.mergedFrom.isBlank()) emptyArray() else arrayOf(tr("Samenvoegen ongedaan maken", "Undo merge")))) { _, i ->
             when (i) {
+                3 -> { unmerge(n); showBook(openBook ?: "") }
                 0 -> moveDialog(n) { toast(tr("Verplaatst", "Moved")); showBook(openBook ?: "") }
                 1 -> { merging = false; orderPick = arrayListOf(); showBook(openBook ?: "") }
                 else -> { merging = true; orderPick = arrayListOf(n.id); showBook(openBook ?: "") }
@@ -857,6 +862,14 @@ class MainActivity : Activity() {
                 }
                 showNote(n)
             },
+        ).let { list ->
+            if (n.mergedFrom.isBlank()) list else list + Action(tr("Splits", "Split"), R.drawable.ic_merge) {
+                AlertDialog.Builder(this).setMessage(tr("Samenvoegen ongedaan maken? Wat je daarna aan deze pagina veranderde, gaat verloren.",
+                    "Undo the merge? Changes made to this page since then are lost."))
+                    .setPositiveButton(tr("Splits", "Split")) { _, _ -> unmerge(n); current = null; editor = null; showBook(n.notebookId) }
+                    .setNegativeButton(tr("Annuleren", "Cancel"), null).show()
+            }
+        } + listOf(
             Action(tr("Wis", "Delete"), R.drawable.ic_delete) {
                 AlertDialog.Builder(this).setMessage(tr("Deze pagina definitief verwijderen?", "Delete this page for good?"))
                     .setPositiveButton(tr("Verwijderen", "Delete")) { _, _ -> store.delete(n.id); current = null; editor = null; showBook(n.notebookId) }
@@ -995,9 +1008,28 @@ class MainActivity : Activity() {
     }
 
     /** [n] with the strokes, text and tags of [o] added; both come from the same sheet, so the ink lines up. */
-    private fun mergeNotes(n: Note, o: Note) = Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
-        listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
-        listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn, n.order)
+    private fun mergeNotes(n: Note, o: Note): Note {
+        // keep every original page inside the merged one, so the merge can be undone
+        val originals = JSONArray()
+        for (x in listOf(n, o)) {
+            if (x.mergedFrom.isBlank()) originals.put(x.toJson())
+            else JSONArray(x.mergedFrom).let { a -> for (i in 0 until a.length()) originals.put(a.getJSONObject(i)) }
+        }
+        return Note(n.id, n.timestamp, n.width, n.height, n.strokes + o.strokes, n.rotation,
+            listOf(n.text, o.text).filter { it.isNotBlank() }.joinToString("\n\n"), n.source, n.notionUrl, n.notebookId, n.driveIds,
+            listOf(n.tags, o.tags).filter { it.isNotBlank() }.joinToString(", "), n.tidy, n.tidyOn, n.order, originals.toString())
+    }
+
+    /** Put the pages of a merge back as they were before it (later edits to the merged page are lost). */
+    private fun unmerge(n: Note) {
+        val a = JSONArray(n.mergedFrom)
+        val originals = (0 until a.length()).map { Note.fromJson(a.getJSONObject(it)) }
+        originals.forEach { store.save(it) } // the first has the merged page's id and replaces it
+        if (originals.none { it.id == n.id }) store.delete(n.id)
+        if (prefs.appendTo == n.id) prefs.appendTo = null
+        thumbs.evictAll()
+        setStatus(tr("Samenvoegen ongedaan gemaakt: ${pages(originals.size)} terug", "Merge undone: ${pages(originals.size)} restored"))
+    }
 
     // ---- export --------------------------------------------------------------------------
 
