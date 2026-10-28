@@ -54,4 +54,6 @@ dependencies {
     implementation("androidx.core:core:1.12.0") // FileProvider for handing the downloaded APK to the installer
     // On-device handwriting recognition (model is downloaded once per language).
     implementation("com.google.mlkit:digital-ink-recognition:18.1.0")
+    // Google sign-in for Drive (an access token for the drive.file scope).
+    implementation("com.google.android.gms:play-services-auth:21.2.0")
 }

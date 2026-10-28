@@ -43,6 +43,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.FileProvider
 import app.sparkink.core.NotionBlocks
+import com.google.android.gms.auth.api.identity.AuthorizationRequest
+import com.google.android.gms.auth.api.identity.Identity
+import com.google.android.gms.common.api.Scope
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
@@ -71,6 +74,7 @@ class MainActivity : Activity() {
     private var statusText = ""
     private var editor: EditText? = null
     private var pendingAfterPermission: (() -> Unit)? = null
+    private var pendingDrive: ((String) -> Unit)? = null
     private var busy = false
 
     private class Action(val label: String, val icon: Int, val run: () -> Unit)
@@ -412,6 +416,7 @@ class MainActivity : Activity() {
 
         val actions = arrayListOf(Action("Synchroniseer", R.drawable.ic_sync) { startSync(book?.id ?: "") })
         if (book != null) {
+            actions.add(Action("Drive", R.drawable.ic_cloud) { uploadToDrive(notes) })
             actions.add(Action("Kleur", R.drawable.ic_palette) {
                 book.color = Ui.COVERS[(Ui.COVERS.indexOf(book.color) + 1) % Ui.COVERS.size]
                 books.save()
@@ -549,6 +554,7 @@ class MainActivity : Activity() {
                 }, null))
             },
             Action("Notion", R.drawable.ic_open_in_new) { onNotionClicked(n) },
+            Action("Drive", R.drawable.ic_cloud) { saveEditor(); uploadToDrive(listOf(n)) },
             Action("Wis", R.drawable.ic_delete) {
                 AlertDialog.Builder(this).setMessage("Deze pagina definitief verwijderen?")
                     .setPositiveButton("Verwijderen") { _, _ -> store.delete(n.id); current = null; editor = null; showBook(n.notebookId) }
@@ -706,7 +712,10 @@ class MainActivity : Activity() {
                 busy = false
                 r.onSuccess { n ->
                     setStatus(if (n == 0) "Geen nieuwe pagina's op de Folio" else "${pages(n)} opgehaald")
-                    if (n > 0) autoOcr(fresh.reversed(), finished = { if (current == null && !inSettings) showBook(target) }) else refresh()
+                    if (n > 0) autoOcr(fresh.reversed(), finished = {
+                        if (current == null && !inSettings) showBook(target)
+                        if (prefs.driveAuto) uploadToDrive(fresh)
+                    }) else refresh()
                 }.onFailure { setStatus("Synchroniseren mislukt: ${it.message}") }
             }
         }
@@ -741,6 +750,52 @@ class MainActivity : Activity() {
                 r.onSuccess { url -> n.notionUrl = url; store.save(n); setStatus("In Notion gezet") }
                     .onFailure { AppLog.add("notion failed: $it"); setStatus("Notion mislukt: ${it.message}") }
                 done()
+            }
+        }
+    }
+
+    // ---- Google Drive --------------------------------------------------------------
+
+    /** Get a Drive access token; the first time Google shows its own account + permission screen. */
+    private fun withDrive(then: (String) -> Unit) {
+        val req = AuthorizationRequest.builder().setRequestedScopes(listOf(Scope(DriveClient.SCOPE))).build()
+        Identity.getAuthorizationClient(this).authorize(req)
+            .addOnSuccessListener { r ->
+                val pi = r.pendingIntent
+                if (r.hasResolution() && pi != null) {
+                    pendingDrive = then
+                    try { startIntentSenderForResult(pi.intentSender, 2, null, 0, 0, 0) }
+                    catch (e: Exception) { pendingDrive = null; setStatus("Google-inlogscherm niet te openen: ${e.message}") }
+                } else r.accessToken?.let(then) ?: setStatus("Google Drive gaf geen toegang")
+            }
+            .addOnFailureListener { AppLog.add("drive auth failed: $it"); setStatus("Inloggen bij Google Drive mislukt: ${it.message}") }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 2) return
+        val then = pendingDrive
+        pendingDrive = null
+        val token = try { Identity.getAuthorizationClient(this).getAuthorizationResultFromIntent(data).accessToken } catch (e: Exception) { null }
+        if (token != null) then?.invoke(token) else setStatus("Geen toegang tot Google Drive gekregen")
+    }
+
+    private fun uploadToDrive(notes: List<Note>) {
+        if (notes.isEmpty()) return
+        withDrive { token ->
+            setStatus("Naar Google Drive…")
+            val titles = notes.associate { it.notebookId to (books.get(it.notebookId)?.title?.ifBlank { "Naamloos" } ?: "Losse pagina's") }
+            bg.execute {
+                var ok = 0
+                var err: Exception? = null
+                for (n in notes) try {
+                    val ids = DriveClient.uploadNote(token, n, titles.getValue(n.notebookId))
+                    main.post { n.driveIds = ids; store.save(n) }
+                    ok++
+                } catch (e: Exception) { AppLog.add("drive upload failed: $e"); err = e }
+                main.post { setStatus(err?.let { "Google Drive: ${pages(ok)} gelukt, fout: ${it.message}" } ?: "${pages(ok)} in Google Drive (map Spark Ink)") }
             }
         }
     }
@@ -860,6 +915,20 @@ class MainActivity : Activity() {
         val nAuto = CheckBox(this).apply { text = "Na tekstherkenning automatisch naar Notion"; isChecked = prefs.notionAuto }
         notion.addView(nAuto)
 
+        val drive = section("Google Drive")
+        note(drive, "Pagina's komen als afbeelding en tekst in de map Spark Ink in je Drive, met een submap per notitieblok. De app ziet alleen de bestanden die hij zelf maakt.")
+        val dAuto = CheckBox(this).apply { text = "Na synchroniseren automatisch naar Google Drive"; isChecked = prefs.driveAuto }
+        drive.addView(dAuto)
+        drive.addView(rowOf(pill("Verbinden", R.drawable.ic_cloud) {
+            withDrive { token ->
+                setStatus("Google Drive controleren…")
+                bg.execute {
+                    val r = try { DriveClient.folder(token, "root", "Spark Ink", null); "Verbonden met Google Drive" } catch (e: Exception) { "Google Drive mislukt: ${e.message}" }
+                    main.post { setStatus(r) }
+                }
+            }
+        }))
+
         val app = section("App")
         note(app, "Versie ${BuildConfig.GIT_SHA}. Updates hebben een GitHub-token met alleen leesrechten (Contents: Read) voor Jeroentjj/Spark-Ink nodig, omdat de repo privé is.")
         val ghToken = field(app, "GitHub-token (alleen voor updates)", prefs.githubToken, secret = true)
@@ -877,6 +946,7 @@ class MainActivity : Activity() {
             prefs.notionToken = nToken.text.toString()
             prefs.notionTarget = nTarget.text.toString()
             prefs.notionAuto = nAuto.isChecked
+            prefs.driveAuto = dAuto.isChecked
         }
         scaffold(header(label("Instellingen", 24f, Ui.INK, bold = true), back = true), ScrollView(this).apply { addView(col) }, emptyList())
     }

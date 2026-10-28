@@ -19,6 +19,7 @@ class Note(
     var source: String,           // where [text] came from: "", "mlkit", "claude", "hand"
     var notionUrl: String = "",   // set once exported to Notion
     var notebookId: String = "",  // "" = loose page, not in a notebook
+    var driveIds: String = "",    // "folder png txt" ids in Google Drive, once uploaded
 ) {
     // Pages are always shown portrait: the pad reports a landscape page, so turn it a quarter.
     init { if (rotation % 180 == 0 && width > height) rotation = (rotation + 90) % 360 }
@@ -28,7 +29,7 @@ class Note(
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id); put("timestamp", timestamp); put("width", width); put("height", height)
         put("rotation", rotation); put("text", text); put("source", source); put("notionUrl", notionUrl)
-        put("notebook", notebookId)
+        put("notebook", notebookId); put("drive", driveIds)
         // [[x,y,p,x,y,p,...], ...] keeps the file small
         put("strokes", JSONArray().also { all ->
             for (s in strokes) all.put(JSONArray().also { a -> for (p in s) { a.put(p.x); a.put(p.y); a.put(p.p) } })
@@ -44,7 +45,7 @@ class Note(
             }
             return Note(j.getString("id"), j.getLong("timestamp"), j.getInt("width"), j.getInt("height"),
                 strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""),
-                j.optString("notebook", ""))
+                j.optString("notebook", ""), j.optString("drive", ""))
         }
     }
 }
@@ -128,6 +129,7 @@ class Prefs(ctx: Context) {
     var notionToken: String get() = sp.getString("notionToken", "") ?: ""; set(v) = sp.edit().putString("notionToken", v.trim()).apply()
     var notionTarget: String get() = sp.getString("notionTarget", "") ?: ""; set(v) = sp.edit().putString("notionTarget", v.trim()).apply()
     var notionAuto: Boolean get() = sp.getBoolean("notionAuto", false); set(v) = sp.edit().putBoolean("notionAuto", v).apply()
+    var driveAuto: Boolean get() = sp.getBoolean("driveAuto", false); set(v) = sp.edit().putBoolean("driveAuto", v).apply()
     val notionReady get() = notionToken.isNotBlank() && app.sparkink.core.NotionBlocks.extractId(notionTarget) != null
 
     var defaultRotation: Int get() = sp.getInt("defaultRotation", 0); set(v) = sp.edit().putInt("defaultRotation", v).apply()
