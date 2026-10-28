@@ -154,6 +154,7 @@ class Prefs(ctx: Context) {
 
     var inkColor: Int get() = sp.getInt("inkColor", 0xFF000000.toInt()); set(v) = sp.edit().putInt("inkColor", v).apply()
     var inkWidth: Float get() = sp.getFloat("inkWidth", 0.35f); set(v) = sp.edit().putFloat("inkWidth", v).apply()
+    var autoSync: Boolean get() = sp.getBoolean("autoSync", true); set(v) = sp.edit().putBoolean("autoSync", v).apply()
     var autoShapes: Boolean get() = sp.getBoolean("autoShapes", true); set(v) = sp.edit().putBoolean("autoShapes", v).apply()
     /** Id of the page that the next synced page is added to ("Aanvullen"), or null. */
     var appendTo: String? get() = sp.getString("appendTo", null); set(v) = sp.edit().putString("appendTo", v).apply()

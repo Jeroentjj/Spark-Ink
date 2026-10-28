@@ -91,6 +91,8 @@ class MainActivity : Activity() {
     private var inTodos = false
     private var showList = false
     private var orderPick: ArrayList<String>? = null // page ids tapped in "set order" mode
+    private var resumed = false
+    private var lastAutoSync = 0L
     private val autoTried = HashSet<String>() // pages already given one automatic text recognition
     private var query = ""
     private var pageInk: InkView? = null
@@ -173,7 +175,29 @@ class MainActivity : Activity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        startWatching()
+    }
+
+    /**
+     * Auto sync: while the app is open, a page comes in as soon as the Folio's button is pressed
+     * (the pad then advertises). A short pause after each sync stops it from firing twice.
+     */
+    private fun startWatching() {
+        if (!resumed || !::prefs.isInitialized || !prefs.autoSync || !pad.isPaired || !pad.bluetoothOn || missingBlePermissions().isNotEmpty()) return
+        pad.watch {
+            // not in Settings: pairing, erasing and pad commands there use the same advert
+            if (busy || inLive || inSettings || orderPick != null || System.currentTimeMillis() - lastAutoSync < 20_000) return@watch
+            lastAutoSync = System.currentTimeMillis()
+            startSync(openBook ?: "")
+        }
+    }
+
     override fun onPause() {
+        resumed = false
+        if (::pad.isInitialized) pad.stopWatch()
         saveEditor()
         saveSettings?.invoke()
         super.onPause()
@@ -1134,11 +1158,15 @@ class MainActivity : Activity() {
 
     // ---- Bluetooth actions ---------------------------------------------------------
 
-    private fun withBlePermissions(then: () -> Unit) {
+    private fun missingBlePermissions(): List<String> {
         val needed = if (Build.VERSION.SDK_INT >= 31)
             arrayOf(Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT)
         else arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
-        val missing = needed.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        return needed.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+    }
+
+    private fun withBlePermissions(then: () -> Unit) {
+        val missing = missingBlePermissions()
         if (missing.isEmpty()) {
             if (!pad.bluetoothOn) return toast(tr("Zet Bluetooth aan", "Turn on Bluetooth"))
             then()
@@ -1217,6 +1245,7 @@ class MainActivity : Activity() {
         if (busy) return
         withBlePermissions {
             busy = true
+            pad.stopWatch() // one scan at a time; restarted when the sync is done
             val fresh = ArrayList<Note>()
             var appended: Note? = null
             pad.sync({ setStatus(it) }, { n ->
@@ -1237,6 +1266,8 @@ class MainActivity : Activity() {
                 if (current == null && !inSettings) showBook(target)
             }) { r ->
                 busy = false
+                lastAutoSync = System.currentTimeMillis()
+                startWatching()
                 r.onSuccess { n ->
                     val extra = appended?.let { tr(" (aangevuld: ${dateOf(it)})", " (extended: ${dateOf(it)})") } ?: ""
                     setStatus(if (n == 0) tr("Geen nieuwe pagina's op de Folio", "No new pages on the Folio") else tr("${pages(n)} opgehaald$extra", "${pages(n)} fetched$extra"))
@@ -1490,6 +1521,12 @@ class MainActivity : Activity() {
             group.addView(RadioButton(this).apply { id = 100 + i; this.text = text; isChecked = prefs.autoOcr == key })
         }
         ocr.addView(group)
+        val syncAuto = CheckBox(this).apply {
+            text = tr("Automatisch synchroniseren zodra je op de knop van de Folio drukt (terwijl de app open is)",
+                "Sync automatically as soon as you press the Folio button (while the app is open)")
+            isChecked = prefs.autoSync
+        }
+        ocr.addView(syncAuto)
         val sAuto = CheckBox(this).apply { text = tr("Na synchroniseren vormen strak maken (lijnen, rechthoeken, cirkels, driehoeken)", "Draw shapes clean after syncing (lines, rectangles, circles, triangles)"); isChecked = prefs.autoShapes }
         ocr.addView(sAuto)
         val key = field(ocr, tr("Claude API-key (blijft alleen op dit toestel)", "Claude API key (stays on this phone only)"), prefs.apiKey, secret = true)
@@ -1534,6 +1571,7 @@ class MainActivity : Activity() {
             prefs.notionAuto = nAuto.isChecked
             prefs.driveAuto = dAuto.isChecked
             prefs.autoShapes = sAuto.isChecked
+            prefs.autoSync = syncAuto.isChecked
         }
         scaffold(header(label(tr("Instellingen", "Settings"), 24f, Ui.INK, bold = true), back = true), ScrollView(this).apply { addView(col) }, emptyList())
     }

@@ -239,17 +239,21 @@ class WacomSession(
         if (!spark) ack(0xec, byteArrayOf(6, 0, 0, 0, 0, 0), "transfer type")
         setPaperMode()
 
-        var remaining = fileCount()
-        log("pages on pad: $remaining")
         var saved = 0
-        while (remaining > 0) {
+        var lastTs = -1L
+        // Ask the count again before every page: after a delete the Spark refuses the next page (b3 01) otherwise.
+        while (true) {
+            val remaining = fileCount()
+            log("pages on pad: $remaining")
+            if (remaining == 0) break
             val (bytes, ts) = strokeInfo()
             log("page of $bytes bytes, timestamp $ts")
+            if (ts == lastTs) { log("same page again: delete did not work, stopping"); break }
+            lastTs = ts
             val raw = downloadOldest()
             if (!onPage(RawPage(ts, raw, info))) break
             deleteOldest()
             saved++
-            remaining--
         }
         return saved
     }

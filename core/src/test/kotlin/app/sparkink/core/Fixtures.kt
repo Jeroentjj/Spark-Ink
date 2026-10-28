@@ -28,6 +28,7 @@ class FakePad(private val kind: PadKind, private val pages: MutableList<Pair<Lon
     private var penAt = 0L
     private val spark get() = kind == PadKind.SPARK
     var deleted = 0
+    private var mustCount = false // the real Spark refuses the next page (b3 01) until it is asked the count again
 
     private fun reply(op: Int, vararg d: Int) = inbox.addLast(NordicMsg(op, ByteArray(d.size) { d[it].toByte() }))
     private fun replyB(op: Int, d: ByteArray) = inbox.addLast(NordicMsg(op, d))
@@ -43,8 +44,8 @@ class FakePad(private val kind: PadKind, private val pages: MutableList<Pair<Lon
                 val v = if (which == 3) 21600 else 14800
                 replyB(0xeb, byteArrayOf(which.toByte(), 0, (v and 0xff).toByte(), ((v shr 8) and 0xff).toByte(), 0, 0))
             }
-            0xc1 -> if (spark) reply(0xc2, pages.size shr 8, pages.size and 0xff) else reply(0xc2, pages.size and 0xff, pages.size shr 8)
-            0xc5 -> { // spark: count (BE) then timestamp
+            0xc1 -> if (spark.also { mustCount = false }) reply(0xc2, pages.size shr 8, pages.size and 0xff) else reply(0xc2, pages.size and 0xff, pages.size shr 8)
+            0xc5 -> if (mustCount) reply(0xb3, 1) else { // spark: count (BE) then timestamp
                 val (ts, data) = pages.first()
                 reply(0xc7, 0, 0, (data.size shr 8) and 0xff, data.size and 0xff)
                 replyB(0xcd, epochToBcd(ts))
@@ -65,7 +66,7 @@ class FakePad(private val kind: PadKind, private val pages: MutableList<Pair<Lon
                     reply(0xc8, 0xed, c.toInt() and 0xff, (c shr 8).toInt() and 0xff, (c shr 16).toInt() and 0xff, (c shr 24).toInt() and 0xff)
                 }
             }
-            0xca -> { pages.removeAt(0); deleted++; if (!spark) reply(0xb3, 0) }
+            0xca -> { pages.removeAt(0); deleted++; mustCount = spark; if (!spark) reply(0xb3, 0) }
             else -> reply(0xb3, 4)
         }
     }

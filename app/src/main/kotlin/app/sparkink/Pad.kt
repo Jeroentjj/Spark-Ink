@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
@@ -77,6 +78,31 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
     fun stopScan() {
         scanCb?.let { try { adapter?.bluetoothLeScanner?.stopScan(it) } catch (_: Exception) {} }
         scanCb = null
+    }
+
+    private var watchCb: ScanCallback? = null
+
+    /** Calls [onSeen] whenever the paired pad advertises (it does after its button is pressed), until [stopWatch]. */
+    fun watch(onSeen: () -> Unit) {
+        stopWatch()
+        val address = prefs.padAddress ?: return
+        val scanner = adapter?.bluetoothLeScanner ?: return
+        val cb = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, r: ScanResult) { ui(onSeen) }
+            override fun onScanFailed(errorCode: Int) { AppLog.add("watch scan failed $errorCode") }
+        }
+        try {
+            scanner.startScan(listOf(ScanFilter.Builder().setDeviceAddress(address).build()),
+                ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_BALANCED).build(), cb)
+            watchCb = cb
+        } catch (e: Exception) {
+            AppLog.add("watch: $e")
+        }
+    }
+
+    fun stopWatch() {
+        watchCb?.let { try { adapter?.bluetoothLeScanner?.stopScan(it) } catch (_: Exception) {} }
+        watchCb = null
     }
 
     /**
