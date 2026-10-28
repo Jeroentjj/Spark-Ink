@@ -14,7 +14,10 @@ import app.sparkink.core.AuthorizationError
 import app.sparkink.core.DeviceError
 import app.sparkink.core.StrokeParser
 import app.sparkink.core.WacomSession
+import app.sparkink.core.Pt
+import app.sparkink.core.hex
 import app.sparkink.core.hexToBytes
+import app.sparkink.core.parseLive
 import java.security.SecureRandom
 import java.util.concurrent.Executors
 
@@ -166,7 +169,8 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                 t = BleTransport(ctx, seen?.device ?: adapter.getRemoteDevice(address)) { AppLog.add(it) }
                 val kind = t.open()
                 ui { status("Notities ophalen…") }
-                val n = WacomSession(t, kind) { AppLog.add(it) }.syncAll(hexToBytes(uuid)) { page ->
+                val session = WacomSession(t, kind) { AppLog.add(it) }
+                val n = session.syncAll(hexToBytes(uuid)) { page ->
                     val parsed = StrokeParser.parse(page.raw)
                     parsed.warnings.forEach { AppLog.add("parse: $it") }
                     var id = page.timestamp.toString()
@@ -180,6 +184,7 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
                     ui { onNote(note) }
                     true
                 }
+                try { session.battery().let { prefs.padBattery = it.first } } catch (e: Exception) { AppLog.add("battery: $e") }
                 ui { done(Result.success(n)) }
             } catch (e: Exception) {
                 AppLog.add("sync failed: $e")
@@ -189,6 +194,61 @@ class Pad(private val ctx: Context, private val prefs: Prefs, private val store:
             }
         }
     }
+
+    // ---- other pad commands -----------------------------------------------------------
+
+    /** Find and connect to the paired pad, run [block] on the worker thread, then disconnect. */
+    private fun <T> withPad(status: (String) -> Unit, block: (BleTransport, WacomSession, ByteArray) -> T, done: (Result<T>) -> Unit) {
+        val address = prefs.padAddress
+        val uuid = prefs.padUuid
+        if (adapter == null || address == null || uuid == null) return done(Result.failure(Exception("Nog geen Folio gekoppeld")))
+        worker.execute {
+            var t: BleTransport? = null
+            try {
+                ui { status("Zoeken naar de Folio… druk nu kort op de knop van de Folio") }
+                val seen = scanFor(address, 40_000)
+                ui { status("Verbinden…") }
+                t = BleTransport(ctx, seen?.device ?: adapter.getRemoteDevice(address)) { AppLog.add(it) }
+                val kind = t.open()
+                val r = block(t, WacomSession(t, kind) { AppLog.add(it) }, hexToBytes(uuid))
+                ui { done(Result.success(r)) }
+            } catch (e: Exception) {
+                AppLog.add("pad command failed: $e")
+                ui { done(Result.failure(Exception(explain(e)))) }
+            } finally {
+                t?.close()
+            }
+        }
+    }
+
+    fun battery(status: (String) -> Unit, done: (Result<Pair<Int, Boolean>>) -> Unit) =
+        withPad(status, { _, s, uuid -> s.batteryOf(uuid).also { prefs.padBattery = it.first } }, done)
+
+    fun rename(name: String, status: (String) -> Unit, done: (Result<String>) -> Unit) =
+        withPad(status, { _, s, uuid -> s.setName(uuid, name); prefs.padName = name; name }, done)
+
+    private val liveStop = java.util.concurrent.atomic.AtomicBoolean()
+
+    /** Stream pen moves to [onPoints] (null = pen lifted) until [stopLive]. Untested on a real Spark. */
+    fun live(status: (String) -> Unit, onPoints: (List<Pt?>) -> Unit, done: (Result<Unit>) -> Unit) {
+        liveStop.set(false)
+        withPad(status, { t, s, uuid ->
+            t.enableLive()
+            var logged = 0
+            t.onLive = { d ->
+                val pts = parseLive(d)
+                if (pts.isNotEmpty()) ui { onPoints(pts) } else if (logged++ < 20) AppLog.add("live ${d.hex()}")
+            }
+            s.startLive(uuid)
+            ui { status("Live: schrijf op de Folio, het verschijnt hier.") }
+            while (!liveStop.get() && t.isOpen) Thread.sleep(200)
+            t.onLive = null
+            if (t.isOpen) try { s.stopLive() } catch (e: Exception) { AppLog.add("stop live: $e") }
+            if (!liveStop.get()) throw Exception("De Folio verbrak de verbinding")
+        }, done)
+    }
+
+    fun stopLive() = liveStop.set(true)
 
     private fun explain(e: Exception): String = when (e) {
         is AuthorizationError -> "De Folio herkent deze app niet meer. Koppel opnieuw (knop 6 sec ingedrukt houden)."

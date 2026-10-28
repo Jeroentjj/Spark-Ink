@@ -26,6 +26,7 @@ object Gatt {
     val NORDIC_TX = uuid("6e400002-b5a3-f393-e0a9-e50e24dcca9e") // we write commands here
     val NORDIC_RX = uuid("6e400003-b5a3-f393-e0a9-e50e24dcca9e") // replies come in here
     val PEN_DATA = uuid("ffee0003-bbaa-9988-7766-554433221100")  // offline pen data stream
+    val LIVE_PEN = uuid("00001524-1212-efde-1523-785feabcd123")  // pen moves in live mode
     val SYSEVENT = uuid("3a340721-c572-11e5-86c5-0002a5d5c51b")  // only on Slate-style pads
     val CCCD = uuid("00002902-0000-1000-8000-00805f9b34fb")
 }
@@ -58,6 +59,10 @@ class BleTransport(
     @Volatile private var disconnected = false
 
     @Volatile private var attempt = 0
+
+    /** Receives live-mode pen data (on the Bluetooth thread) once [enableLive] was called. */
+    @Volatile var onLive: ((ByteArray) -> Unit)? = null
+    val isOpen get() = !disconnected
 
     private fun newCallback(id: Int) = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
@@ -106,6 +111,7 @@ class BleTransport(
         when (id) {
             Gatt.NORDIC_RX -> lock.withLock { nordic.write(value); cond.signalAll() }
             Gatt.PEN_DATA -> lock.withLock { pen.write(value); penAt = System.currentTimeMillis() }
+            Gatt.LIVE_PEN -> onLive?.invoke(value)
             else -> log("notify $id ${value.size} bytes")
         }
     }
@@ -164,6 +170,9 @@ class BleTransport(
         sys?.let { enableNotify(it) }
         return if (sys == null) PadKind.SPARK else PadKind.SLATE
     }
+
+    /** Only for live mode, so the proven sync path does not touch this characteristic. */
+    fun enableLive() = enableNotify(find(Gatt.LIVE_PEN) ?: throw WacomException("Deze Folio heeft geen live-modus"))
 
     private fun find(id: UUID): BluetoothGattCharacteristic? {
         for (s in gatt!!.services) s.getCharacteristic(id)?.let { return it }

@@ -84,6 +84,26 @@ class WacomSession(
 
     private fun setPaperMode() = ack(0xb1, byteArrayOf(1), "paper mode")
 
+    /** Log in and switch to live mode: the pad then streams every pen move (see [parseLive]). */
+    fun startLive(uuid: ByteArray) {
+        connect(uuid)
+        ack(0xb1, byteArrayOf(0), "live mode")
+    }
+
+    /** Back to normal recording on paper. */
+    fun stopLive() = setPaperMode()
+
+    /** The Spark firmware needs the trailing line break (Tuhi). */
+    fun setName(uuid: ByteArray, name: String) {
+        connect(uuid)
+        ack(0xbb, (name.take(30) + "\n").toByteArray(Charsets.UTF_8), "set name")
+    }
+
+    fun batteryOf(uuid: ByteArray): Pair<Int, Boolean> {
+        connect(uuid)
+        return battery()
+    }
+
     private fun fileCount(): Int {
         val m = request(0xc1, byteArrayOf(0), 0xc2, "file count")
         return if (spark) m.data.u16be(0) else m.data.u16le(0)

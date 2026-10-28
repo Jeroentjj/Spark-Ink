@@ -35,7 +35,7 @@ class FakePad(private val kind: PadKind, private val pages: MutableList<Pair<Lon
     override fun send(opcode: Int, args: ByteArray) {
         sent.add(opcode)
         when (opcode) {
-            0xe6, 0xe3, 0xb6, 0xb1, 0xec, 0xe1 -> reply(0xb3, 0)
+            0xe6, 0xe3, 0xb6, 0xb1, 0xec, 0xe1, 0xbb -> reply(0xb3, 0)
             0xe2 -> { pages.clear(); reply(0xb3, 0) }
             0xb9 -> reply(0xba, 87, 0)
             0xea -> {

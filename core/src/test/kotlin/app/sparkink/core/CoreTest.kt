@@ -109,4 +109,29 @@ class CoreTest {
         assertEquals(listOf("delete all pages: ok", "reset to defaults: ok"), r)
         assertEquals(listOf(0xe6, 0xe2, 0xe1), pad.sent)
     }
+
+    @Test
+    fun liveModeAndNameCommands() {
+        val pad = FakePad(PadKind.SPARK, mutableListOf())
+        val w = WacomSession(pad, PadKind.SPARK)
+        w.startLive(hexToBytes("a1b2c3d4e5f6"))
+        w.stopLive()
+        w.setName(hexToBytes("a1b2c3d4e5f6"), "Mijn Folio")
+        assertEquals(listOf(0xe6, 0xb1, 0xb1, 0xe6, 0xbb), pad.sent)
+    }
+
+    @Test
+    fun parsesLivePenData() {
+        val d = byteArrayOf(0xa1.toByte(), 12, 0x10, 0x27, 0x20, 0x4e, 0x64, 0, -1, -1, -1, -1, -1, -1)
+        assertEquals(listOf(Pt(10000, 20000, 100), null), parseLive(d))
+        assertEquals(emptyList(), parseLive(byteArrayOf(0xa2.toByte(), 4, 0, 0, 0, 0)))
+    }
+
+    @Test
+    fun svgHasOnePolylinePerStroke() {
+        val svg = Sketch(listOf(listOf(Pt(1, 2, 3), Pt(4, 5, 6)), listOf(Pt(7, 8, 9))), 21000, 14800).toSvg()
+        assertTrue(svg.contains("width=\"210.0mm\""))
+        assertEquals(2, Regex("<polyline").findAll(svg).count())
+        assertTrue(svg.contains("points=\"7,8 7,8\""))
+    }
 }
