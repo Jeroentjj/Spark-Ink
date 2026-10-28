@@ -29,5 +29,11 @@ object Ui {
         0xFF6E55A0.toInt(), // purple
         0xFFC08A26.toInt(), // mustard
         0xFF3E4A59.toInt(), // slate
+        0xFF8E3B5E.toInt(), // plum
+        0xFF4A7A2E.toInt(), // green
+        0xFF1F7A8C.toInt(), // petrol
+        0xFFD06A2C.toInt(), // orange
+        0xFF7A6248.toInt(), // brown
+        0xFF2A2A30.toInt(), // black
     )
 }
