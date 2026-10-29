@@ -70,6 +70,9 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.graphics.Paint
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.view.KeyEvent
+import android.widget.PopupMenu
 import android.animation.ValueAnimator
 import android.view.animation.LinearInterpolator
 import java.text.SimpleDateFormat
@@ -106,6 +109,9 @@ class MainActivity : Activity() {
     private var saveSettings: (() -> Unit)? = null
     private var inLive = false
     private var inTodos = false
+    private var inArchive = false
+    private var listSave: Runnable? = null // a list item typed but not saved yet
+    private val doneLog by lazy { DoneLog(this) }
     private var showList = false
     private var selected: ArrayList<String>? = null // pages picked in the open notebook, in the order tapped
     private var dragMode = false // pages show a handle to drag them to another place or chapter
@@ -124,6 +130,8 @@ class MainActivity : Activity() {
     private var busy = false
 
     private class Action(val label: String, val icon: Int, val run: () -> Unit)
+    private class ListTask(var text: String, var done: Boolean)
+    private class ItemDrag(val list: String, val index: Int)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -226,6 +234,7 @@ class MainActivity : Activity() {
         val book = openBook
         when {
             inLive -> { pad.stopLive(); inLive = false; if (book != null) showBook(book) else showHome() }
+            inArchive -> showTodos()
             inTodos && current == null -> { inTodos = false; showHome() }
             current == null && (selected != null || dragMode) -> { selected = null; dragMode = false; showBook(book ?: "") }
             current != null -> { saveEditor(); current = null; showBook(book ?: "") }
@@ -244,6 +253,7 @@ class MainActivity : Activity() {
         val book = openBook
         when {
             inLive -> {}
+            inArchive -> showListArchive()
             inTodos && n == null -> showTodos()
             n != null -> showNote(n)
             inSettings -> { saveSettings?.invoke(); showSettings() }
@@ -448,7 +458,7 @@ class MainActivity : Activity() {
 
     private fun showHome() {
         saveEditor()
-        current = null; editor = null; openBook = null; inSettings = false; inTodos = false; saveSettings = null
+        current = null; editor = null; openBook = null; inSettings = false; inTodos = false; inArchive = false; saveSettings = null
         selected = null; dragMode = false
         val notes = store.all()
         val content = FrameLayout(this)
@@ -935,7 +945,7 @@ class MainActivity : Activity() {
                 background = rounded(Ui.SURFACE, 12)
                 elevation = dp(2).toFloat()
                 setPadding(dp(12), dp(8), dp(12), dp(8))
-                addView(checklist(n, withAdd = true))
+                addView(Checklist(n, withAdd = true).view)
             }
         } else if (!showText) {
             editor = null
@@ -1020,6 +1030,8 @@ class MainActivity : Activity() {
     }
 
     private fun saveEditor() {
+        listSave?.let { main.removeCallbacks(it); it.run() }
+        listSave = null
         val n = current ?: return
         val e = editor ?: return
         val t = e.text.toString()
@@ -1040,39 +1052,214 @@ class MainActivity : Activity() {
         showNote(n)
     }
 
-    /** Tickable list of the tasks in [n]; ticking rewrites "- [ ]" / "- [x]" in its text. */
-    private fun checklist(n: Note, withAdd: Boolean, after: () -> Unit = { showNote(n) }) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        for (item in Todo.items(n.text)) addView(CheckBox(context).apply {
-            text = item.text
-            textSize = 16f
-            setTextColor(Ui.INK)
-            buttonTintList = ColorStateList.valueOf(Ui.ACCENT)
-            setPadding(dp(4), dp(8), 0, dp(8))
-            isChecked = item.done
-            fun look() {
-                paintFlags = if (isChecked) paintFlags or Paint.STRIKE_THRU_TEXT_FLAG else paintFlags and Paint.STRIKE_THRU_TEXT_FLAG.inv()
-                alpha = if (isChecked) 0.55f else 1f
+    private fun strike(v: TextView, on: Boolean) {
+        v.paintFlags = if (on) v.paintFlags or Paint.STRIKE_THRU_TEXT_FLAG else v.paintFlags and Paint.STRIKE_THRU_TEXT_FLAG.inv()
+        v.alpha = if (on) 0.55f else 1f
+    }
+
+    /**
+     * The tasks of [n], edited in place: Enter adds an item below (or splits at the cursor), Enter or
+     * Backspace on an empty item removes it, swipe left deletes with undo, the handle drags. Ticked
+     * items fold away under "Voltooid".
+     */
+    private inner class Checklist(val n: Note, val withAdd: Boolean) {
+        private val rows = Todo.items(n.text).map { ListTask(it.text, it.done) }.toMutableList()
+        private val edits = HashMap<Int, EditText>()
+        private var addEdit: EditText? = null
+        private var rendering = false
+        private val imm = getSystemService(InputMethodManager::class.java)
+        private val save = Runnable {
+            n.text = Todo.withItems(n.text, rows.map { it.text to it.done })
+            n.tags = Todo.withTag(n.tags, n.text)
+            store.save(n)
+        }
+        val view = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.VERTICAL }
+
+        init { render(null) }
+
+        private fun commit() { main.removeCallbacks(save); save.run() }
+
+        private fun snapshot() = rows.map { ListTask(it.text, it.done) }
+
+        private fun restore(before: List<ListTask>) {
+            rows.clear(); rows.addAll(before); commit()
+            if (view.isAttachedToWindow) render(null) else refresh()
+        }
+
+        private fun focused() = edits.entries.firstOrNull { it.value.hasFocus() }?.let { it.key to it.value.selectionStart }
+
+        /** Rebuild the rows and put the cursor in row [focus] at [cursor] (-1 = end); [ADD] = the new-item field, null = none. */
+        fun render(focus: Int? = focused()?.first, cursor: Int = focused()?.second ?: -1) {
+            rendering = true
+            view.removeAllViews(); edits.clear(); addEdit = null
+            for (i in rows.indices) if (!rows[i].done) view.addView(row(i))
+            if (withAdd) view.addView(addField())
+            val done = rows.indices.filter { rows[it].done }
+            if (done.isNotEmpty()) {
+                view.addView(doneHeader(done.size))
+                if (n.doneOpen) for (i in done) view.addView(row(i))
             }
-            look()
-            setOnCheckedChangeListener { _, _ -> n.text = Todo.toggle(n.text, item.line); store.save(n); look() }
-        })
-        if (withAdd) addView(EditText(context).apply {
-            hint = tr("+ Nieuw item", "+ New item")
-            setSingleLine()
-            imeOptions = EditorInfo.IME_ACTION_DONE
+            rendering = false
+            val target = if (focus == ADD) addEdit else focus?.let { edits[it] }
+            if (target == null) imm.hideSoftInputFromWindow(view.windowToken, 0)
+            else target.post {
+                target.requestFocus()
+                target.setSelection(if (cursor < 0 || cursor > target.length()) target.length() else cursor)
+                imm.showSoftInput(target, 0)
+            }
+        }
+
+        private fun input(e: EditText) = e.apply {
+            background = null
+            textSize = 16f
             setTextColor(Ui.INK); setHintTextColor(Ui.MUTED)
-            setOnEditorActionListener { v, _, _ ->
-                val t = v.text.toString()
-                if (t.isNotBlank()) {
-                    n.text = Todo.add(n.text, t)
-                    n.tags = Todo.withTag(n.tags, n.text)
-                    store.save(n)
-                    after()
+            // one-line input so Enter is an action, but long items still wrap
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            setHorizontallyScrolling(false)
+            maxLines = 20
+            imeOptions = EditorInfo.IME_ACTION_NEXT or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+        }
+
+        private fun row(i: Int): View {
+            val t = rows[i]
+            val swipe = SwipeRow(this@MainActivity) { delete(i) }.apply { background = rounded(Ui.DANGER_SOFT, 8) }
+            val edit = input(EditText(this@MainActivity)).apply {
+                setText(t.text)
+                strike(this, t.done)
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                    override fun afterTextChanged(s: Editable?) {
+                        t.text = s.toString(); listSave = save
+                        main.removeCallbacks(save); main.postDelayed(save, 600)
+                    }
+                })
+                setOnEditorActionListener { _, _, _ -> enter(i, selectionStart); true }
+                setOnKeyListener { _, code, e ->
+                    if (code == KeyEvent.KEYCODE_DEL && e.action == KeyEvent.ACTION_DOWN && length() == 0) { removeEmpty(i); true } else false
                 }
+                setOnFocusChangeListener { _, has ->
+                    // an item left empty disappears
+                    if (!has && !rendering && t.text.isBlank() && rows.getOrNull(i) === t) {
+                        rows.removeAt(i); commit()
+                        view.post { val f = focused(); render(f?.first?.let { if (it > i) it - 1 else it }, f?.second ?: -1) }
+                    }
+                }
+            }
+            edits[i] = edit
+            val content = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(Ui.SURFACE)
+                addView(CheckBox(context).apply {
+                    buttonTintList = ColorStateList.valueOf(Ui.ACCENT)
+                    isChecked = t.done
+                    setOnCheckedChangeListener { _, on ->
+                        t.done = on; commit()
+                        if (on) doneLog.add(n.id, t.text)
+                        strike(edit, on)
+                        // stays struck through for a moment, then folds away
+                        main.postDelayed({ if (view.isAttachedToWindow) render() }, 1200)
+                    }
+                })
+                addView(edit, LinearLayout.LayoutParams(0, WRAP, 1f))
+                if (!t.done) addView(icon(R.drawable.ic_drag, Ui.MUTED, 22).apply {
+                    contentDescription = tr("Verslepen", "Drag")
+                    setPadding(dp(8), dp(8), dp(4), dp(8))
+                    setOnTouchListener { _, e ->
+                        if (e.actionMasked == MotionEvent.ACTION_DOWN)
+                            swipe.startDragAndDrop(ClipData.newPlainText("spark", t.text), View.DragShadowBuilder(swipe), ItemDrag(n.id, i), 0)
+                        true
+                    }
+                }, LinearLayout.LayoutParams(dp(34), dp(38)))
+            }
+            swipe.addView(content, FrameLayout.LayoutParams(MATCH, WRAP))
+            swipe.setOnDragListener { v, e ->
+                val d = e.localState as? ItemDrag
+                when {
+                    d == null || d.list != n.id -> false
+                    e.action == DragEvent.ACTION_DRAG_ENTERED -> { v.alpha = 0.5f; true }
+                    e.action == DragEvent.ACTION_DRAG_EXITED || e.action == DragEvent.ACTION_DRAG_ENDED -> { v.alpha = 1f; true }
+                    e.action == DragEvent.ACTION_DROP -> { v.alpha = 1f; main.post { move(d.index, i) }; true }
+                    else -> true
+                }
+            }
+            return swipe
+        }
+
+        private fun addField() = input(EditText(this@MainActivity)).apply {
+            hint = tr("+ Nieuw item", "+ New item")
+            addEdit = this
+            setOnEditorActionListener { v, _, _ ->
+                val s = v.text.toString()
+                if (s.isBlank()) render(null) else { rows.add(ListTask(s.trim(), false)); commit(); render(ADD) }
                 true
             }
+        }
+
+        private fun doneHeader(count: Int) = LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(10), 0, dp(4))
+            addView(icon(if (n.doneOpen) R.drawable.ic_expand_less else R.drawable.ic_expand_more, Ui.MUTED, 20))
+            addView(label(tr("Voltooid ($count)", "Done ($count)"), 14f, Ui.MUTED, bold = true).apply { setPadding(dp(6), 0, 0, 0) },
+                LinearLayout.LayoutParams(0, WRAP, 1f))
+            addView(label(tr("Wissen", "Clear"), 13f, Ui.ACCENT, bold = true).apply {
+                setPadding(dp(12), dp(6), dp(8), dp(6))
+                setOnClickListener {
+                    val before = snapshot()
+                    rows.removeAll { it.done }; commit(); render(null)
+                    undoBar(tr("Voltooide items gewist", "Done items cleared")) { restore(before) }
+                }
+            })
+            setOnClickListener { n.doneOpen = !n.doneOpen; commit(); render(null) }
+        }
+
+        private fun enter(i: Int, cur: Int) {
+            val t = rows[i]
+            if (t.text.isBlank()) { rows.removeAt(i); commit(); render(null); return }
+            val c = cur.coerceIn(0, t.text.length)
+            rows.add(i + 1, ListTask(t.text.substring(c).trim(), false))
+            t.text = t.text.substring(0, c).trimEnd()
+            commit(); render(i + 1, 0)
+        }
+
+        private fun removeEmpty(i: Int) {
+            rows.removeAt(i); commit()
+            render(rows.indices.lastOrNull { it < i && !rows[it].done }, -1)
+        }
+
+        private fun delete(i: Int) {
+            val before = snapshot()
+            rows.removeAt(i); commit(); render(null)
+            undoBar(tr("Item verwijderd", "Item deleted")) { restore(before) }
+        }
+
+        // dropped on a row lower down it goes below it, higher up above it
+        private fun move(from: Int, to: Int) {
+            if (from == to || from !in rows.indices || to !in rows.indices) return
+            rows.add(to, rows.removeAt(from)); commit(); render(null)
+        }
+    }
+
+    /** "Item verwijderd — Ongedaan maken" for 5 s above the action bar. */
+    private fun undoBar(msg: String, undo: () -> Unit) {
+        val root = findViewById<ViewGroup>(android.R.id.content).getChildAt(0) as? FrameLayout ?: return
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = rounded(Ui.INK, 10)
+            elevation = dp(16).toFloat()
+            setPadding(dp(16), 0, dp(4), 0)
+            addView(label(msg, 14f, Ui.BG), LinearLayout.LayoutParams(0, WRAP, 1f))
+        }
+        bar.addView(label(tr("Ongedaan maken", "Undo"), 14f, Ui.COVERS[0], bold = true).apply {
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setOnClickListener { root.removeView(bar); undo() }
         })
+        root.addView(bar, FrameLayout.LayoutParams(MATCH, dp(48), Gravity.BOTTOM).apply { setMargins(dp(12), 0, dp(12), dp(64)) })
+        main.postDelayed({ root.removeView(bar) }, 5000)
     }
 
     private fun isList(n: Note) = Todo.items(n.text).isNotEmpty() || n.tags.split(",").any { it.trim().equals(Todo.TAG, ignoreCase = true) }
@@ -1082,7 +1269,7 @@ class MainActivity : Activity() {
         .firstOrNull { it.isNotEmpty() && !it.startsWith("- [") } ?: dateOf(n)
 
     private fun todoCard(notes: List<Note>): View {
-        val lists = notes.filter { isList(it) }
+        val lists = notes.filter { isList(it) && it.archived == 0L }
         val open = lists.sumOf { n -> Todo.items(n.text).count { !it.done } }
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1102,8 +1289,10 @@ class MainActivity : Activity() {
     /** Every to-do list, each in its own card, tickable and extendable in one place. */
     private fun showTodos() {
         saveEditor()
-        current = null; editor = null; openBook = null; inSettings = false; inTodos = true
-        val lists = store.all().filter { isList(it) }
+        current = null; editor = null; openBook = null; inSettings = false; inTodos = true; inArchive = false
+        val now = System.currentTimeMillis()
+        store.all(bin = true).filter { now - it.trashed > BIN_MS }.forEach { store.delete(it.id) }
+        val lists = store.all().filter { isList(it) && it.archived == 0L }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         for (n in lists) {
             val book = books.get(n.notebookId)?.title?.ifBlank { tr("Naamloos", "Untitled") } ?: tr("Losse pagina's", "Loose pages")
@@ -1113,13 +1302,23 @@ class MainActivity : Activity() {
                 background = rounded(Ui.SURFACE, 12)
                 setPadding(dp(14), dp(10), dp(14), dp(6))
                 addView(LinearLayout(context).apply {
-                    orientation = LinearLayout.VERTICAL
-                    addView(label(listTitle(n), 17f, Ui.INK, bold = true))
-                    addView(label("$book · $open open", 12f, Ui.MUTED))
-                    ripple(this)
-                    setOnClickListener { openNote(n) }
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    addView(LinearLayout(context).apply {
+                        orientation = LinearLayout.VERTICAL
+                        addView(label(listTitle(n), 17f, Ui.INK, bold = true))
+                        addView(label("$book · $open open", 12f, Ui.MUTED))
+                        ripple(this)
+                        setOnClickListener { openNote(n) }
+                        setOnLongClickListener { listMenu(n, it); true }
+                    }, LinearLayout.LayoutParams(0, WRAP, 1f))
+                    addView(label("⋯", 24f, Ui.MUTED).apply {
+                        contentDescription = tr("Lijstmenu", "List menu")
+                        setPadding(dp(14), 0, dp(4), 0)
+                        setOnClickListener { listMenu(n, it) }
+                    })
                 })
-                addView(checklist(n, withAdd = true) { showTodos() })
+                addView(Checklist(n, withAdd = true).view)
             }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(12) })
         }
         val body = if (lists.isEmpty()) label(tr("Nog geen lijsten. Maak er een, of schrijf ‘To do’ of vakjes op de Folio.", "No lists yet. Make one, or write ‘To do’ or boxes on the Folio."), 15f, Ui.MUTED)
@@ -1133,7 +1332,60 @@ class MainActivity : Activity() {
                     showTodos()
                 }
             },
+            Action(tr("Archief", "Archive"), R.drawable.ic_folder) { showListArchive() },
         ), tr("Lijsten", "Lists"))
+    }
+
+    private fun listMenu(n: Note, anchor: View) = PopupMenu(this, anchor).apply {
+        menu.add(0, 1, 0, tr("Archiveren", "Archive"))
+        menu.add(0, 2, 1, tr("Verwijderen", "Delete"))
+        setOnMenuItemClickListener { item ->
+            saveEditor()
+            val archive = item.itemId == 1
+            if (archive) n.archived = System.currentTimeMillis() else n.trashed = System.currentTimeMillis()
+            store.save(n)
+            showTodos()
+            undoBar(if (archive) tr("Lijst gearchiveerd", "List archived") else tr("Lijst in de prullenbak", "List moved to the bin")) {
+                n.archived = 0; n.trashed = 0; store.save(n); refresh()
+            }
+            true
+        }
+        show()
+    }
+
+    /** Archived lists and the bin (emptied after 30 days): put back, or delete. */
+    private fun showListArchive() {
+        saveEditor()
+        inArchive = true
+        val now = System.currentTimeMillis()
+        val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        fun section(title: String, ns: List<Note>, bin: Boolean) {
+            col.addView(label(title, 15f, Ui.MUTED, bold = true).apply { setPadding(dp(4), dp(16), 0, dp(4)) })
+            if (ns.isEmpty()) col.addView(label(tr("Leeg", "Empty"), 14f, Ui.MUTED).apply { setPadding(dp(4), 0, 0, 0) })
+            for (n in ns) col.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                background = rounded(Ui.SURFACE, 12)
+                setPadding(dp(14), dp(10), dp(14), dp(6))
+                addView(label(listTitle(n), 16f, Ui.INK, bold = true))
+                if (bin) {
+                    val days = ((BIN_MS - (now - n.trashed)) / 86_400_000L).coerceAtLeast(0)
+                    addView(label(tr("Nog $days dagen, daarna weg", "$days days left, then gone"), 12f, Ui.MUTED))
+                }
+                addView(rowOf(
+                    pill(tr("Terugzetten", "Restore"), R.drawable.ic_arrow_back) { n.archived = 0; n.trashed = 0; store.save(n); showListArchive() },
+                    pill(if (bin) tr("Definitief wissen", "Delete for good") else tr("Verwijderen", "Delete"), R.drawable.ic_delete, Ui.DANGER) {
+                        if (!bin) { n.trashed = System.currentTimeMillis(); store.save(n); showListArchive() }
+                        else AlertDialog.Builder(this@MainActivity)
+                            .setMessage(tr("‘${listTitle(n)}’ definitief wissen? Dit kan niet ongedaan worden.", "Delete ‘${listTitle(n)}’ for good? This cannot be undone."))
+                            .setPositiveButton(tr("Wissen", "Delete")) { _, _ -> store.delete(n.id); showListArchive() }
+                            .setNegativeButton(tr("Annuleren", "Cancel"), null).show()
+                    },
+                ))
+            }, LinearLayout.LayoutParams(MATCH, WRAP).apply { topMargin = dp(8) })
+        }
+        section(tr("Archief", "Archive"), store.all().filter { it.archived > 0 }, false)
+        section(tr("Prullenbak", "Bin"), store.all(bin = true), true)
+        scaffold(header(label(tr("Archief", "Archive"), 24f, Ui.INK, bold = true), back = true), ScrollView(this).apply { addView(col) }, emptyList())
     }
 
     private fun findShapes(n: Note, done: () -> Unit) {
@@ -1858,6 +2110,42 @@ class MainActivity : Activity() {
 }
 
 /** Vertical swipes over the action bar open (up) or close (down) it; taps and sideways scrolling pass through. */
+private const val ADD = -2 // Checklist: focus the new-item field
+private const val BIN_MS = 30L * 86_400_000 // lists stay in the bin this long
+
+/** Swipe the row left past a third of its width to delete it; the row slides with the finger. */
+private class SwipeRow(ctx: Context, private val onSwiped: () -> Unit) : FrameLayout(ctx) {
+    private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2
+    private var x0 = 0f
+    private var y0 = 0f
+    private var dragging = false
+
+    override fun onInterceptTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { x0 = e.x; y0 = e.y; dragging = false }
+            MotionEvent.ACTION_MOVE -> if (x0 - e.x > slop && abs(e.x - x0) > abs(e.y - y0) * 2) {
+                dragging = true; parent.requestDisallowInterceptTouchEvent(true)
+            }
+        }
+        return dragging
+    }
+
+    override fun onTouchEvent(e: MotionEvent): Boolean {
+        val c = getChildAt(0) ?: return false
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { x0 = e.x; y0 = e.y }
+            MotionEvent.ACTION_MOVE -> if (dragging || x0 - e.x > slop) { dragging = true; c.translationX = min(0f, e.x - x0) }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (e.actionMasked == MotionEvent.ACTION_UP && -c.translationX > width / 3f)
+                    c.animate().translationX(-width.toFloat()).setDuration(150).withEndAction { onSwiped() }.start()
+                else c.animate().translationX(0f).setDuration(150).start()
+                dragging = false
+            }
+        }
+        return true
+    }
+}
+
 private class SwipeBar(ctx: Context, private val onSwipe: (up: Boolean) -> Unit) : LinearLayout(ctx) {
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2
     private var x0 = 0f

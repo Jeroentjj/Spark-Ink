@@ -154,6 +154,11 @@ class CoreTest {
         assertEquals("werk, todo", Todo.withTag("werk", boxed))
         assertEquals("werk, Todo", Todo.withTag("werk, Todo", boxed))
         assertEquals("- [ ] a\n- [ ] b", Todo.add("- [ ] a", "b"))
+        assertEquals("T\n- [ ] b\n- [x] a\nnoot", Todo.withItems("T\n- [ ] a\n- [x] b\nnoot", listOf("b" to false, "a" to true)))
+        assertEquals("T\n- [ ] a\n- [ ] \n- [ ] c\nnoot", Todo.withItems("T\n- [ ] a\nnoot", listOf("a" to false, "" to false, "c" to false)))
+        assertEquals("T\nnoot", Todo.withItems("T\n- [ ] a\nnoot", emptyList()))
+        assertEquals("T\n- [ ] x", Todo.withItems("T\n", listOf("x" to false)))
+        assertEquals(listOf("a", ""), Todo.items("- [ ] a\n- [ ] ").map { it.text })
     }
 
     @Test

@@ -26,6 +26,9 @@ class Note(
     var order: Long = Long.MIN_VALUE, // place in its notebook once the user reordered it
     var mergedFrom: String = "",  // JSON array of the original pages when this page is a merge (undo)
     var chapter: String = "",     // chapter inside its notebook, "" = none
+    var archived: Long = 0,       // ms when its list was archived, 0 = not
+    var trashed: Long = 0,        // ms when it went to the bin (gone for good after 30 days), 0 = not
+    var doneOpen: Boolean = false, // its list shows the ticked items
 ) {
     /** Position in the notebook: newest first until the user drags pages around. */
     val sortKey get() = if (order == Long.MIN_VALUE) -timestamp else order
@@ -40,6 +43,7 @@ class Note(
         put("id", id); put("timestamp", timestamp); put("width", width); put("height", height)
         put("rotation", rotation); put("text", text); put("source", source); put("notionUrl", notionUrl)
         put("notebook", notebookId); put("drive", driveIds); put("tags", tags); put("tidyOn", tidyOn); put("order", order); put("mergedFrom", mergedFrom); put("chapter", chapter)
+        put("archived", archived); put("trashed", trashed); put("doneOpen", doneOpen)
         put("tidy", JSONObject().also { o -> for ((k, s) in tidy) o.put(k.toString(), flat(s)) })
         // [[x,y,p,x,y,p,...], ...] keeps the file small
         put("strokes", JSONArray().also { all -> for (s in strokes) all.put(flat(s)) })
@@ -56,7 +60,8 @@ class Note(
             return Note(j.getString("id"), j.getLong("timestamp"), j.getInt("width"), j.getInt("height"),
                 strokes, j.optInt("rotation", 0), j.optString("text", ""), j.optString("source", ""), j.optString("notionUrl", ""),
                 j.optString("notebook", ""), j.optString("drive", ""), j.optString("tags", ""),
-                tidy ?: emptyMap(), j.optBoolean("tidyOn", true), j.optLong("order", Long.MIN_VALUE), j.optString("mergedFrom", ""), j.optString("chapter", ""))
+                tidy ?: emptyMap(), j.optBoolean("tidyOn", true), j.optLong("order", Long.MIN_VALUE), j.optString("mergedFrom", ""), j.optString("chapter", ""),
+                j.optLong("archived", 0), j.optLong("trashed", 0), j.optBoolean("doneOpen", false))
         }
     }
 }
@@ -76,15 +81,25 @@ class NoteStore(ctx: Context) {
         Note.fromJson(JSONObject(File(dir, "$id.json").readText()))
     } catch (e: Exception) { null }
 
-    fun all(): List<Note> =
+    /** Every page, or with [bin] only the ones in the bin. */
+    fun all(bin: Boolean = false): List<Note> =
         (dir.listFiles { f -> f.name.endsWith(".json") } ?: emptyArray())
             .mapNotNull { load(it.name.removeSuffix(".json")) }
+            .filter { (it.trashed > 0) == bin }
             .sortedByDescending { it.timestamp }
 
     /** [keepRaw]: the page lives on inside another one, so keep the pad's original bytes. */
     fun delete(id: String, keepRaw: Boolean = false) {
         File(dir, "$id.json").delete(); if (!keepRaw) File(dir, "$id.raw").delete()
     }
+}
+
+/** Every ticked task with its time, apart from the lists, so deleting a list keeps the count (for achievements). */
+class DoneLog(ctx: Context) {
+    private val file = File(ctx.filesDir, "done.jsonl")
+
+    fun add(listId: String, task: String) = file.appendText(JSONObject().put("list", listId)
+        .put("task", task.trim().lowercase()).put("at", System.currentTimeMillis()).toString() + "\n")
 }
 
 class Notebook(val id: String, var title: String, var color: Int)

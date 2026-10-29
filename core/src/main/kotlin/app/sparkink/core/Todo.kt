@@ -66,6 +66,24 @@ object Todo {
 
     fun add(text: String, item: String): String = text.trimEnd() + (if (text.isBlank()) "" else "\n") + "- [ ] " + item.trim()
 
+    /**
+     * [text] with its task lines replaced by [items] (text, done) in this order. Other lines stay
+     * where they are; extra items go after the last task, or at the end when there is none.
+     */
+    fun withItems(text: String, items: List<Pair<String, Boolean>>): String {
+        fun line(t: Pair<String, Boolean>) = "- [${if (t.second) "x" else " "}] " + t.first.trim()
+        val lines = text.lines()
+        val slots = lines.indices.filter { task.matches(lines[it]) }
+        if (slots.isEmpty()) return (listOf(text.trimEnd()).filter { it.isNotEmpty() } + items.map(::line)).joinToString("\n")
+        val rest = items.iterator()
+        val out = ArrayList<String>()
+        for ((i, l) in lines.withIndex()) {
+            if (i !in slots) out.add(l) else if (rest.hasNext()) out.add(line(rest.next()))
+            if (i == slots.last()) rest.forEach { out.add(line(it)) }
+        }
+        return out.joinToString("\n")
+    }
+
     /** Tag list with [TAG] added when the text is a to-do list. */
     fun withTag(tags: String, text: String): String {
         val list = tags.split(",").map { it.trim() }.filter { it.isNotEmpty() }
