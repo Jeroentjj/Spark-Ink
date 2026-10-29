@@ -2065,7 +2065,8 @@ class MainActivity : Activity() {
             prefs.autoShapes = sAuto.isChecked
             prefs.autoSync = syncAuto.isChecked
         }
-        scaffold(View(this), ScrollView(this).apply { addView(col) }, emptyList())
+        // an empty LinearLayout, not a bare View: a View with wrap_content takes all the height
+        scaffold(LinearLayout(this), ScrollView(this).apply { addView(col) }, emptyList())
     }
 
     /** Colour wheel: hue around the circle, white towards the middle, and a slider for how dark. */
@@ -2109,7 +2110,6 @@ class MainActivity : Activity() {
     }
 }
 
-/** Vertical swipes over the action bar open (up) or close (down) it; taps and sideways scrolling pass through. */
 private const val ADD = -2 // Checklist: focus the new-item field
 private const val BIN_MS = 30L * 86_400_000 // lists stay in the bin this long
 
@@ -2146,6 +2146,7 @@ private class SwipeRow(ctx: Context, private val onSwiped: () -> Unit) : FrameLa
     }
 }
 
+/** Vertical swipes over the action bar open (up) or close (down) it; taps and sideways scrolling pass through. */
 private class SwipeBar(ctx: Context, private val onSwipe: (up: Boolean) -> Unit) : LinearLayout(ctx) {
     private val slop = ViewConfiguration.get(ctx).scaledTouchSlop * 2
     private var x0 = 0f
