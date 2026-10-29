@@ -54,6 +54,16 @@ jobs:
           emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           script: sh .github/smoke.sh
 
+      - name: Keep the emulator screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-screens
+          path: |
+            *.png
+            logcat*.txt
+            ui.xml
+
       - name: Publish as the "sparkink-latest" release
         env:
           GH_TOKEN: ${{ github.token }}
